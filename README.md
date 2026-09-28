@@ -1,6 +1,7 @@
 # luci-app-netview
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/zhouzhouzk/luci-app-netview?sort=semver)](https://github.com/zhouzhouzk/luci-app-netview/releases/latest)
 
 ImmortalWrt / OpenWrt 的实时网络流量查看器（LuCI 插件）。
 
@@ -58,13 +59,22 @@ luci-app-netview/
 
 ## 安装
 
-### 方式 A：安装 ipk（推荐）
+### 方式 A：直接下载 ipk（推荐）
+
+从 [Releases](https://github.com/zhouzhouzk/luci-app-netview/releases/latest) 下载
+`luci-app-netview_1.0.0-r1_all.ipk`，传到路由器安装：
 
 ```sh
-python build-ipk.py                    # 产物: dist/luci-app-netview_1.0.0-r1_all.ipk
-
-scp dist/luci-app-netview_1.0.0-r1_all.ipk root@192.168.1.1:/tmp/
+scp luci-app-netview_1.0.0-r1_all.ipk root@192.168.1.1:/tmp/
 ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.0.0-r1_all.ipk'
+```
+
+也可以让路由器自己下载（省掉中转）：
+
+```sh
+cd /tmp
+wget https://github.com/zhouzhouzk/luci-app-netview/releases/download/v1.0.0/luci-app-netview_1.0.0-r1_all.ipk
+opkg install luci-app-netview_1.0.0-r1_all.ipk
 ```
 
 卸载：`opkg remove luci-app-netview`。
@@ -76,9 +86,20 @@ ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.0.0-r1_all.ipk'
 > **注意 ipk 格式**：ImmortalWrt 24.10 起，`.ipk` 已不是老式的 `ar` 归档，而是
 > `gzip(tar{./debian-binary, ./data.tar.gz, ./control.tar.gz})`。`build-ipk.py` 生成的就是这个新格式
 > （成员名、顺序、tar 变体、八进制字段填充都与官方源里的包一致）。
-> **23.05 及更早的 opkg 只认老格式**，那些版本请改用下面的方式 B 或进 SDK 编译。
+> **23.05 及更早的 opkg 只认老格式**，那些版本请改用下面的方式 C 或进 SDK 编译。
 
-### 方式 B：免编译一键部署
+### 方式 B：自己构建 ipk
+
+需要 Python 3，不需要 OpenWrt SDK：
+
+```sh
+python build-ipk.py                    # 产物: dist/luci-app-netview_1.0.0-r1_all.ipk
+
+scp dist/luci-app-netview_1.0.0-r1_all.ipk root@192.168.1.1:/tmp/
+ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.0.0-r1_all.ipk'
+```
+
+### 方式 C：免编译一键部署
 
 不想做成包、只想快点看到效果时用这个，直接 scp 四个文件上去：
 
@@ -89,7 +110,7 @@ cd luci-app-netview
 ./install.sh --uninstall 192.168.1.1  # 卸载
 ```
 
-### 方式 C：进 SDK / feed 编译
+### 方式 D：进 SDK / feed 编译
 
 ```sh
 cp -r luci-app-netview package/
