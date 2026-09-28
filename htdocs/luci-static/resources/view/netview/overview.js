@@ -65,7 +65,13 @@ var CSS = [
 	'  --nv-card:   var(--oc-surface, #ffffff);',
 	'  --nv-border: var(--oc-border, #ecedf3);',
 	'  --nv-text:   var(--oc-text, #2b3445);',
-	'  --nv-muted:  var(--oc-text-muted, #8a94a6);',
+	/* 次要文字不再跟随 --oc-text-muted：Argon 给的是 #8898aa，在白卡上只有
+	 * 2.95:1、在页底上 2.70:1，小字号中文看着就是一片糊 —— 达不到正文
+	 * AA 要求的 4.5:1。下面这两个值都在各自的底上实算过：
+	 *   亮 #5f6d84 → 白卡 5.24 / Argon 浅底 4.96 / Argon 页底 4.80 / 无主题页底 4.76
+	 *   暗 #8a93a5 → 卡片 5.33 / 页底 5.85
+	 * 最差也有 4.76:1。仍明显弱于主文字（亮 12.50、暗 11.99），层次还在。 */
+	'  --nv-muted:  #5f6d84;',
 	'  --nv-dn:     ' + C_DOWN + ';',
 	'  --nv-up:     ' + C_UP + ';',
 	'  --nv-ok:     #22c55e;',
@@ -75,13 +81,18 @@ var CSS = [
 	'  color: var(--nv-text); font-size: 13px; line-height: 1.5;',
 	'  padding: 2px 0 28px;',
 	'}',
+	/* 暗色这一套**不沿用 --oc-***，全部写死。
+	 * Argon 的 header.ut 是「cascade.css 常驻 + 按需叠加 dark.css」，
+	 * 而 dark.css 并没有全局重定义 --oc-*（只在 openclash 那页重定义了一套）。
+	 * 也就是说暗色下全局的 --oc-surface 仍然是 #fff —— 照搬就会把卡片画成
+	 * 白色、边框画成浅灰，暗色模式整个是坏的。 */
 	'@media (prefers-color-scheme: dark) {',
 	'  .nv-root {',
-	'    --nv-bg:     var(--oc-surface-muted, #14161c);',
-	'    --nv-card:   var(--oc-surface, #1c1f27);',
-	'    --nv-border: var(--oc-border, #2b3038);',
-	'    --nv-text:   var(--oc-text, #d8dce4);',
-	'    --nv-muted:  var(--oc-text-muted, #8a93a5);',
+	'    --nv-bg:     #14161c;',
+	'    --nv-card:   #1c1f27;',
+	'    --nv-border: #2b3038;',
+	'    --nv-text:   #d8dce4;',
+	'    --nv-muted:  #8a93a5;',
 	'    --nv-off:    #5b6373;',
 	'    --nv-shadow: 0 1px 2px rgba(0,0,0,.35), 0 10px 28px rgba(0,0,0,.28);',
 	'  }',
@@ -92,10 +103,33 @@ var CSS = [
 	'           border-radius: var(--nv-radius); box-shadow: var(--nv-shadow); }',
 
 	/* ---- page head ---- */
-	'.nv-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px;',
-	'           margin: 0 2px 14px; }',
-	'.nv-head h2 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: .01em; }',
-	'.nv-head .nv-sub { font-size: 11.5px; color: var(--nv-muted); }',
+	/* 主题的全局标题样式会改造这里，必须先收回控制权。以 Argon 为例：
+	 *
+	 *   1) h2 { padding:1rem 1.25rem; background:var(--white); box-shadow:… }
+	 *      —— 它把**每一个** h2 都当成"页面标题卡片"。而本插件的标题是
+	 *      .nv-head 这个 flex 容器里的 flex item，套上卡片后会被收缩成一行
+	 *      窄白卡，副标题被挤到卡片外面 —— 正好落在 Argon 页头那条 2rem 高的
+	 *      主色横带（header::after）上。#8898aa 叠 #5e72e4 只有 1.42:1，
+	 *      那行字基本等于隐形，看着就像"字缺了一半"。
+	 *   2) h3 { display:block; width:100%; background:var(--white) }
+	 *      —— 同样会把区块标题撑成整条白卡，把右边的说明挤成两行。
+	 *   3) h1..h6 { line-height: 1.1 !important }
+	 *      —— 中文标题会被压扁。要压掉对方的 !important 只能也用 !important
+	 *      （这里选择器权重更高，且本样式在 <body> 内、文档序更靠后）。
+	 *
+	 * 另外把标题区做成卡片：无论主题在背后画什么横带，标题和副标题都落在
+	 * 确定的底色上。这既符合 Argon 自己"页面标题即卡片"的惯例，也让它成为
+	 * 主题无关的解法 —— 不用去猜某个主题的横带有多高。 */
+	'.nv-root h2, .nv-root h3 { margin: 0; padding: 0; width: auto; display: block;',
+	'                           background: none; border: 0; box-shadow: none;',
+	'                           border-radius: 0; color: inherit;',
+	'                           line-height: 1.4 !important; }',
+	'.nv-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 5px 12px;',
+	'           margin: 0 0 16px; padding: 13px 18px;',
+	'           background: var(--nv-card); border: 1px solid var(--nv-border);',
+	'           border-radius: var(--nv-radius); box-shadow: var(--nv-shadow); }',
+	'.nv-head h2 { font-size: 17px; font-weight: 600; letter-spacing: .01em; }',
+	'.nv-head .nv-sub { font-size: 12px; color: var(--nv-muted); }',
 	'.nv-live { display: inline-block; width: 6px; height: 6px; border-radius: 50%;',
 	'           background: var(--nv-ok); margin-right: 5px; vertical-align: 1px; }',
 
@@ -171,7 +205,8 @@ var CSS = [
 	/* ---- sections ---- */
 	'.nv-sec { margin-top: 18px; }',
 	'.nv-sec-hd { display: flex; align-items: baseline; gap: 10px; margin: 0 2px 10px; }',
-	'.nv-sec-hd h3 { margin: 0; font-size: 14px; font-weight: 600; }',
+	/* 卡片外观由上面「page head」里的 .nv-root h2/h3 全局重置收回 */
+	'.nv-sec-hd h3 { font-size: 14px; font-weight: 600; }',
 	'.nv-sec-hd span { font-size: 11.5px; color: var(--nv-muted); }',
 
 	/* ---- tables ---- */

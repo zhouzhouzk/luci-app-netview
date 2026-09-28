@@ -275,6 +275,97 @@ check('CSS 未残留未替换的拼接痕迹', !/\+\s*'\./.test(API.CSS));
 check('包含响应式折叠', API.CSS.includes('max-width: 1000px'));
 check('包含暗色回退', API.CSS.includes('prefers-color-scheme: dark'));
 
+/* --------------------------------------------- 10. 主题碰撞 / 可读性回归 --- */
+/* 这一节盯的是两类"在纯预览页里看不出来、只有装到路由器上才暴露"的问题：
+ *
+ *   a) 主题（Argon）把自己的全局样式施加到插件的标题上，把标题变成白卡、
+ *      让副标题落在页头的主色横带上 —— 字等于隐形。
+ *   b) 暗色令牌照搬主题的 --oc-*，而 Argon 的 dark.css 并没有全局重定义
+ *      这些变量，暗色下拿到的是亮色值，卡片会变成白的。
+ *
+ * 都是靠"把值算出来"而不是靠看图断言，才拦得住。
+ */
+console.log('\n=== 主题碰撞与可读性 ===');
+
+const css = API.CSS;
+const darkAt = css.indexOf('@media (prefers-color-scheme: dark) {');
+check('CSS 里有暗色媒体查询块', darkAt > 0);
+const lightCss = darkAt > 0 ? css.slice(0, darkAt) : css;
+const darkCss  = darkAt > 0 ? css.slice(darkAt) : '';
+
+/* var(--name, fallback) -> fallback（够用，不会出现三层） */
+function resolve(v) {
+	const m = String(v == null ? '' : v).match(/^var\(\s*[^,]+,\s*([\s\S]+)\)$/);
+	return m ? resolve(m[1].trim()) : String(v == null ? '' : v).trim();
+}
+function token(section, name) {
+	const m = section.match(new RegExp('--' + name + '\\s*:\\s*([^;]+);'));
+	return m ? resolve(m[1]) : null;
+}
+function hl(c) {
+	const m = String(c).match(/^#([0-9a-fA-F]{6})$/);
+	if (!m) return null;
+	const n = parseInt(m[1], 16);
+	return [ (n >> 16) & 255, (n >> 8) & 255, n & 255 ];
+}
+function lum(rgb) {
+	const f = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+	return 0.2126 * f(rgb[0]) + 0.7152 * f(rgb[1]) + 0.0722 * f(rgb[2]);
+}
+function ratio(fg, bg) {
+	const a = hl(fg), b = hl(bg);
+	if (!a || !b) return -1;              /* 不是纯色 → 让断言失败并暴露出来 */
+	const la = lum(a), lb = lum(b);
+	return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
+function aa(label, fg, bg, min) {
+	const r = ratio(fg, bg);
+	check(label, r >= min, fg + ' on ' + bg + ' = ' +
+		(r < 0 ? '非纯色（解析不出）' : r.toFixed(2) + ':1') + '，要求 ' + min + ':1');
+}
+
+/* ---- 标题必须从主题手里拿回来 ---- */
+check('标题重置：h2/h3 去掉卡片外观',
+	/\.nv-root h2, \.nv-root h3 \{[\s\S]*?background:\s*none/.test(css) &&
+	/\.nv-root h2, \.nv-root h3 \{[\s\S]*?box-shadow:\s*none/.test(css));
+check('标题重置：宽度收回（Argon 的 h3 带 width:100%）',
+	/\.nv-root h2, \.nv-root h3 \{[\s\S]*?width:\s*auto/.test(css));
+check('标题重置：行高用 !important 压过主题的 1.1 !important',
+	/\.nv-root h2, \.nv-root h3 \{[\s\S]*?line-height:\s*1\.4\s*!important/.test(css));
+check('标题区自带底色，主题的页头横带压不进文字',
+	/\.nv-head \{[\s\S]*?background:\s*var\(--nv-card\)/.test(css));
+
+/* ---- 次要文字：不能沿用 Argon 的 --oc-text-muted（#8898aa，白卡上仅 2.95:1） ---- */
+check('亮色 --nv-muted 不沿用主题变量（#8898aa 达不到 AA）',
+	token(lightCss, 'nv-muted') && !/var\(--oc-text-muted/.test(
+		(lightCss.match(/--nv-muted\s*:[^;]+;/) || [''])[0]));
+check('暗色 --nv-muted 为固定色', !!hl(token(darkCss, 'nv-muted')));
+
+/* ---- 暗色块不得再引用 --oc-*（Argon dark.css 不重定义它，会拿到亮色值） ---- */
+check('暗色块不引用 --oc-*',
+	!/var\(--oc-/.test(darkCss),
+	(darkCss.match(/var\(--oc-[a-z-]+/) || [''])[0]);
+[ 'nv-bg', 'nv-card', 'nv-border', 'nv-text', 'nv-muted' ].forEach(function(t) {
+	check('暗色 --' + t + ' 是纯色', !!hl(token(darkCss, t)), String(token(darkCss, t)));
+});
+
+/* ---- 实算对比度 ---- */
+console.log('  -- 对比度 --');
+aa('亮：次要文字 / 卡片', token(lightCss, 'nv-muted'), token(lightCss, 'nv-card'), 4.5);
+aa('亮：次要文字 / 页底', token(lightCss, 'nv-muted'), token(lightCss, 'nv-bg'), 4.5);
+aa('亮：主文字 / 卡片',   token(lightCss, 'nv-text'),  token(lightCss, 'nv-card'), 7);
+aa('暗：次要文字 / 卡片', token(darkCss,  'nv-muted'), token(darkCss,  'nv-card'), 4.5);
+aa('暗：次要文字 / 页底', token(darkCss,  'nv-muted'), token(darkCss,  'nv-bg'), 4.5);
+aa('暗：主文字 / 卡片',   token(darkCss,  'nv-text'),  token(darkCss,  'nv-card'), 7);
+
+/* 曲线用色刻意写死：它们要跨明暗两种主题标识同一条序列，不能被主题色牵走。
+ * 只在 .nv-root 上定义一次、暗色块不重复定义 —— 一旦暗色块里出现它们，
+ * 就说明有人开始按模式改数据色了，那不是我们想要的。 */
+check('下载/上传数据色为固定值（不跟随主题色）',
+	!!hl(token(lightCss, 'nv-dn')) && !!hl(token(lightCss, 'nv-up')));
+check('暗色块不重复定义数据色（应沿用 .nv-root 上的同一组）',
+	token(darkCss, 'nv-dn') === null && token(darkCss, 'nv-up') === null);
+
 console.log('\n======================================');
 console.log('  pass ' + pass + '   fail ' + fail);
 console.log('======================================');

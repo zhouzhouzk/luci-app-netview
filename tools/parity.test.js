@@ -90,6 +90,48 @@ const prevStripped = stripForceDark(prevCss);
 check('确实剥掉了 force-dark 覆盖块', prevStripped.length < prevCss.length);
 same('预览 CSS 与视图 CSS 完全一致（剥掉 force-dark 后）', viewCss, prevStripped);
 
+/* ---- 3b. Argon 测试页必须与预览页同源 ------------------------------------ */
+/* preview/argon-harness.html 是 tools/argon-harness.js 生成的。它把预览页的
+ * .nv-root 整块搬进 Argon 骨架，所以"搬过去的那一段"必须和预览页逐字节一致 ——
+ * 否则改了预览页却忘了重新生成，测试页就会悄悄停留在旧界面上，
+ * 而它恰好是用来判断"装到路由器上长什么样"的，误导性最强。
+ */
+const HARNESS = require('path').join(__dirname, '..', 'preview', 'argon-harness.html');
+
+if (!fs.existsSync(HARNESS)) {
+	check('Argon 测试页存在', false, '跑 node tools/argon-harness.js 生成');
+} else {
+	const harness = fs.readFileSync(HARNESS, 'utf8');
+	check('Argon 测试页存在', true);
+	check('Argon 测试页标明了是生成物', harness.includes('由 tools/argon-harness.js 生成'));
+
+	/* 骨架照抄 header.ut，这两处缺一个就不算复现了 */
+	check('测试页有 Argon 页头骨架', harness.includes('<header class="bg-primary">'));
+	check('测试页有 Argon 主内容容器', harness.includes('<div id="maincontent">'));
+
+	/* 样式挂法与 Argon 一致：cascade 常驻 + dark 挂 media 查询 */
+	check('测试页挂 cascade.css', harness.includes('argon/css/cascade.css'));
+	check('测试页的 dark.css 挂 prefers-color-scheme',
+		harness.includes('argon/css/dark.css" media="(prefers-color-scheme: dark)"'));
+
+	/* 搬运过来的 .nv-root 必须一模一样 */
+	const A = '<!-- ↓↓↓ 以下 .nv-root 由 overview-preview.html 原样搬运 ↓↓↓ -->\n';
+	const B = '\n\t\t\t\t<!-- ↑↑↑ .nv-root 结束 ↑↑↑ -->';
+	const hi = harness.indexOf(A), hj = harness.indexOf(B);
+	check('测试页里有搬运标记', hi > 0 && hj > hi);
+
+	const pi = prevRaw.indexOf('<main class="pg-wrap">\n');
+	const pj = prevRaw.indexOf('\n</main>\n');
+	check('预览页里有对应区间', pi > 0 && pj > pi);
+
+	if (hi > 0 && hj > hi && pi > 0 && pj > pi) {
+		const inHarness = harness.slice(hi + A.length, hj);
+		const inPreview = prevRaw.slice(pi + '<main class="pg-wrap">\n'.length, pj);
+		same('测试页搬运的 .nv-root 与预览页逐字节一致（不一致就重新生成）',
+			inPreview, inHarness);
+	}
+}
+
 /* ---- 4. load both render layers ------------------------------------------ */
 function loadViewApi(src) {
 	let s = src.replace(/^'require [^']*';$/gm, '');

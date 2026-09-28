@@ -73,14 +73,16 @@ luci-app-netview/
 ├── htdocs/luci-static/resources/view/netview/
 │   └── overview.js                              # 前端视图
 ├── preview/
-│   └── overview-preview.html                    # 本地界面预览（模拟数据，双击打开）
+│   ├── overview-preview.html                    # 本地界面预览（模拟数据，双击打开）
+│   └── argon-harness.html                       # Argon 骨架下的渲染测试页（生成物）
 ├── docs/                                        # README 用的界面截图
 │   ├── screenshot-light.png
 │   └── screenshot-dark.png
 ├── tools/                                       # 自检脚本，见「验证」一节
-│   ├── render.test.js                           # 渲染函数、曲线几何、刻度取整
+│   ├── render.test.js                           # 渲染函数、曲线几何、刻度取整、对比度
 │   ├── parity.test.js                           # 预览页与视图的一致性
-│   └── backend.test.sh                          # 后端 shell 辅助函数（假 sysfs 树）
+│   ├── backend.test.sh                          # 后端 shell 辅助函数（假 sysfs 树）
+│   └── argon-harness.js                         # 生成 preview/argon-harness.html
 └── root/
     ├── usr/libexec/rpcd/netview                 # rpcd 后端脚本（ubus 对象 netview）
     ├── usr/share/rpcd/acl.d/luci-app-netview.json
@@ -94,19 +96,19 @@ luci-app-netview/
 ### 方式 A：直接下载 ipk（推荐）
 
 从 [Releases](https://github.com/zhouzhouzk/luci-app-netview/releases/latest) 下载
-`luci-app-netview_1.1.0-r1_all.ipk`，传到路由器安装：
+`luci-app-netview_1.1.1-r1_all.ipk`，传到路由器安装：
 
 ```sh
-scp luci-app-netview_1.1.0-r1_all.ipk root@192.168.1.1:/tmp/
-ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.1.0-r1_all.ipk'
+scp luci-app-netview_1.1.1-r1_all.ipk root@192.168.1.1:/tmp/
+ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.1.1-r1_all.ipk'
 ```
 
 也可以让路由器自己下载（省掉中转）：
 
 ```sh
 cd /tmp
-wget https://github.com/zhouzhouzk/luci-app-netview/releases/download/v1.1.0/luci-app-netview_1.1.0-r1_all.ipk
-opkg install luci-app-netview_1.1.0-r1_all.ipk
+wget https://github.com/zhouzhouzk/luci-app-netview/releases/download/v1.1.1/luci-app-netview_1.1.1-r1_all.ipk
+opkg install luci-app-netview_1.1.1-r1_all.ipk
 ```
 
 卸载：`opkg remove luci-app-netview`。
@@ -125,10 +127,10 @@ opkg install luci-app-netview_1.1.0-r1_all.ipk
 需要 Python 3，不需要 OpenWrt SDK：
 
 ```sh
-python build-ipk.py                    # 产物: dist/luci-app-netview_1.1.0-r1_all.ipk
+python build-ipk.py                    # 产物: dist/luci-app-netview_1.1.1-r1_all.ipk
 
-scp dist/luci-app-netview_1.1.0-r1_all.ipk root@192.168.1.1:/tmp/
-ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.1.0-r1_all.ipk'
+scp dist/luci-app-netview_1.1.1-r1_all.ipk root@192.168.1.1:/tmp/
+ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.1.1-r1_all.ipk'
 ```
 
 ### 方式 C：免编译一键部署
@@ -147,7 +149,7 @@ cd luci-app-netview
 ```sh
 cp -r luci-app-netview package/
 make package/luci-app-netview/compile V=s
-# 产物: bin/packages/*/base/luci-app-netview_1.1.0-r1_all.ipk
+# 产物: bin/packages/*/base/luci-app-netview_1.1.1-r1_all.ipk
 ```
 
 装完打开 `http://192.168.1.1/cgi-bin/luci/admin/status/netview`，菜单位置：**状态 → 网络流量**。
@@ -209,12 +211,31 @@ python build-ipk.py --list               # 只看载荷清单，不生成文件
 `var(--oc-surface, <内置回退>)`：
 
 - 装了 [luci-theme-argon](https://github.com/jerrykuku/luci-theme-argon) 时 `--oc-*` 生效，
-  卡片、边框、文字自动融进主题。Argon 的暗色模式是**整份替换样式表**（`cascade.css` → `dark.css`），
-  两套各自完整定义了 `--oc-*`，所以明暗切换不需要写任何 `prefers-color-scheme`
+  卡片、边框、文字自动融进主题
 - 没装 Argon（或主题不定义 `--oc-*`）时回退到内置亮色值；系统偏好为深色时，由一段
   `@media (prefers-color-scheme: dark)` 换成内置暗色值
 - **数据色刻意不跟随主题主色**：下载蓝 `#4a9df5`、上传紫 `#8b5cf6` 是两个系列的身份标识，
   在明暗两套下保持同一色相才便于对照
+
+### 和 Argon 的三处冲突（都已处理）
+
+Argon 的全局样式会改造插件自己的 DOM，下面每一条都是实测出来的，不是推测：
+
+| Argon 的规则 | 后果 | 处理 |
+| --- | --- | --- |
+| `h2 { padding:1rem 1.25rem; background:var(--white); box-shadow:… }`<br>`h3 { display:block; width:100%; background:var(--white) }` | 它把**每个** `h2`/`h3` 都当成"页面标题卡片"。插件的标题是 `.nv-head`（flex 容器）里的 flex item，套上卡片后被收缩成一行窄白卡，副标题被挤到卡片外；区块标题被撑成整条白卡，把右侧说明挤成两行 | 用 `.nv-root h2, .nv-root h3` 把卡片外观收回（`background:none` / `width:auto` / `box-shadow:none`） |
+| `header::after { position:absolute; height:2rem; background:var(--primary) !important }` | 页头下方一条 2rem 高的主色横带，绝对定位后正好压进内容区顶部。标题区自己没有底色时，副标题就落在横带上 —— `#8898aa` 叠 `#5e72e4` 只有 **1.42:1**，那行字等于隐形，看着像"字缺了一半" | 让 `.nv-head` 自带 `--nv-card` 底色。比去猜横带高度更稳，也不依赖具体主题 |
+| `h1..h6 { line-height: 1.1 !important }` | 中文标题被压扁 | 重置里用 `!important` 压回去（选择器权重更高、文档序更靠后） |
+
+### 暗色为什么写死
+
+Argon 的 `header.ut` 是 **`cascade.css` 常驻 + 按需叠加 `dark.css`**，而 `dark.css` **并没有全局
+重定义 `--oc-*`**（只在 openclash 那一页重定义了一套）。也就是说暗色下全局的
+`--oc-surface` 仍然是 `#fff` —— 插件的暗色令牌若写成 `var(--oc-surface, #1c1f27)`，
+拿到的会是白色，卡片直接变白，整个暗色模式是坏的。
+
+所以 `@media (prefers-color-scheme: dark)` 那一块里的值**全部写死**，不引用任何 `--oc-*`。
+每个值都实算过对比度，`tools/render.test.js` 里有断言看着（见「验证」一节）。
 
 布局与渲染细节：
 
@@ -238,19 +259,32 @@ opkg install luci-theme-argon luci-app-argon-config luci-i18n-argon-config-zh-cn
 本地预览页 `preview/overview-preview.html` 用模拟数据驱动同一套渲染代码，右上角可切换亮/暗模式。
 它是**手工同步的副本**，改样式时两个文件都要动 —— `tools/parity.test.js` 就是用来防这件事的。
 
+预览页**不带任何主题样式**，所以它看不出插件与主题之间的冲突。要看"装了 Argon 之后长什么样"，
+用 `preview/argon-harness.html`：它把同一份 `.nv-root` 塞进 Argon 的 DOM 骨架
+（`header.bg-primary` + `#maincontent > .container`，照抄 `header.ut`），并挂上 CDN 上锁版本的
+Argon 样式。一个文件同时覆盖明暗 —— `cascade.css` 常驻、`dark.css` 挂
+`media="(prefers-color-scheme: dark)"`，与 Argon 的加载方式一致，切浏览器暗色偏好即可看暗色。
+
 ## 验证
 
-仓库自带三组自检，只依赖 Node.js 与 POSIX shell，不需要路由器：
+仓库自带三组自检，只依赖 Node.js 与 POSIX shell，不需要路由器，也不需要 Argon：
 
 ```sh
-node tools/render.test.js     # 渲染函数 / 曲线几何 / 刻度取整 / 空数据与错误分支
+node tools/render.test.js     # 渲染函数 / 曲线几何 / 刻度取整 / 主题碰撞 / 对比度
 node tools/parity.test.js     # 预览页与视图：CSS 与渲染输出必须逐字节一致
 sh   tools/backend.test.sh    # 后端 shell 辅助函数（用假 sysfs 树跑）
+
+node tools/argon-harness.js   # 另：重新生成 preview/argon-harness.html
 ```
 
 - `render.test.js` 会把视图模块在沙箱里加载，用构造出的 ubus 报文调用各个渲染函数，
   断言输出里不出现 `NaN` / `undefined`。几何部分进一步校验曲线坐标落在画布内、
   面积在基线闭合、峰值不会离顶部太远（只查 NaN 是抓不到"曲线被压扁"的）
+- 同一份测试还会**把 CSS 里的颜色取出来算对比度**，而不是靠肉眼断言：分别解析明暗两块里的
+  `--nv-muted` / `--nv-text` / `--nv-card` / `--nv-bg`，要求次要文字在各底色上都 ≥ 4.5:1、
+  主文字 ≥ 7:1。同时断言暗色块里**不出现 `var(--oc-`**（一旦出现，Argon 暗色下就会拿到亮色值）、
+  标题重置的几条规则还在。这三类问题在纯预览页里都看不出来，只有装到路由器上才暴露，
+  所以必须靠算出来的断言拦住
 - `parity.test.js` 剥掉预览页独有的 `.nv-force-dark` 覆盖块后，要求两边 CSS 完全一致，
   并用同一份输入比对 `sideHtml` / `ifTableHtml` / `chartSvg` / 格式化函数的输出
 - `backend.test.sh` 把脚本里硬编码的 `/sys/class/net` 重定向到临时假目录，
@@ -273,6 +307,10 @@ sh   tools/backend.test.sh    # 后端 shell 辅助函数（用假 sysfs 树跑�
 | 连接状态显示"未连接互联网"但其实能上网      | 判断依据是 `ifstatus wan` 的 `up`。WAN 接口不叫 `wan`（多 WAN / 自定义名）时就会误报                       |
 | IP 地址显示"未获取"                 | 确认 `ip -4 addr show dev <wan设备> scope global` 有输出；WAN 设备名取自 `ifstatus` 的 `l3_device`      |
 | 网卡速率显示"—"                    | 无线、隧道以及部分虚拟设备没有 `speed` 属性；网桥会回落到成员端口，都没有就显示 `—`                          |
+| 标题变成一块窄白卡、副标题看不清或"缺一半"         | Argon 把每个 `h2` 都当标题卡片，副标题被挤到页头的 `header::after` 主色横带上（`#8898aa` 叠 `#5e72e4` 仅 1.42:1）。1.1.1 起已修；旧版本可临时在自定义 CSS 里加 `.nv-head h2 { padding:0; background:none; box-shadow:none }` 并把 `.nv-head` 加上背景色 |
+| 暗色模式下卡片全是白的                   | 暗色令牌误用了 `var(--oc-surface, …)`，而 Argon 的 `dark.css` 并不全局重定义 `--oc-*`，暗色下拿到的还是 `#fff`。1.1.1 起暗色值改为写死 |
+| 中文标题行距被压得很扁                   | Argon 有 `h1..h6 { line-height: 1.1 !important }`；1.1.1 起在标题重置里用 `!important` 压回去了                |
+| 想确认是不是主题把页面带歪了                | 打开 `preview/argon-harness.html`（Argon 骨架 + 官方样式，明暗都能看），与 `overview-preview.html` 对照          |
 | 曲线看起来太"平"                    | 空闲链路上纵轴有 32 KB/s 地板值，避免噪声被放大成满屏尖峰；有实际流量时曲线才会撑起来                            |
 | "已连接设备"数与设备排行条数对不上        | 两个口径不同：前者数 ARP 在线主机，后者只统计经过 NAT 转发且有流量的设备                                     |
 

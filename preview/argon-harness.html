@@ -1,48 +1,46 @@
 <!DOCTYPE html>
+<!--
+  由 tools/argon-harness.js 生成，请勿手改。
+  用途：在真实的 Argon 主题（v2.4.7）骨架下渲染 netview 页面，
+  用来看主题的全局样式有没有把插件带歪。
+  cascade.css 常驻、dark.css 挂 prefers-color-scheme —— 与 Argon 一致，
+  所以一个文件同时覆盖明暗：切浏览器暗色偏好即可看暗色。
+  重新生成：node tools/argon-harness.js
+-->
+
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>luci-app-netview — 界面预览</title>
+<title>luci-app-netview — Argon 主题下的渲染结果</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/jerrykuku/luci-theme-argon@2.4.7/htdocs/luci-static/argon/css/cascade.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/jerrykuku/luci-theme-argon@2.4.7/htdocs/luci-static/argon/css/dark.css" media="(prefers-color-scheme: dark)">
 <style>
+	/* 只补 Argon 不管的最基础一条：预览页不是 LuCI 的 index，没有 reset */
 	html, body { margin: 0; padding: 0; }
-	body {
-		background: #eef0f5; min-height: 100vh;
-		font-family: "Google Sans", "Microsoft YaHei", -apple-system, "Segoe UI", Roboto, sans-serif;
-		-webkit-font-smoothing: antialiased;
-	}
-	body.dark { background: #0f1116; }
-
-	.pg-bar {
-		position: sticky; top: 0; z-index: 10;
-		display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-		padding: 12px 22px; background: rgba(255,255,255,.88);
-		backdrop-filter: blur(10px); border-bottom: 1px solid #e3e6ee;
-	}
-	body.dark .pg-bar { background: rgba(20,22,28,.88); border-color: #2a2f38; }
-	.pg-title { font-size: 13.5px; font-weight: 600; color: #2b3445; }
-	body.dark .pg-title { color: #d8dce4; }
-	.pg-note { font-size: 11.5px; color: #8a94a6; }
-	.pg-bar button {
-		margin-left: auto; cursor: pointer; font: inherit; font-size: 12px;
-		padding: 6px 14px; border-radius: 999px; border: 1px solid #d9dee9;
-		background: #fff; color: #2b3445; transition: all .15s ease;
-	}
-	.pg-bar button:hover { border-color: #4a9df5; color: #4a9df5; }
-	body.dark .pg-bar button { background: #1c1f27; border-color: #333a45; color: #cfd5df; }
-
-	.pg-wrap { max-width: 1240px; margin: 0 auto; padding: 20px 22px 60px; }
 </style>
 </head>
 <body>
 
-<div class="pg-bar">
-	<span class="pg-title">luci-app-netview 界面预览</span>
-	<span class="pg-note">模拟数据 · 每 3 秒刷新一次</span>
-	<button id="tg">切换到暗色模式</button>
-</div>
-
-<main class="pg-wrap">
+<div class="main">
+	<div class="main-left" id="mainmenu" style="display:none"></div>
+	<div class="main-right">
+		<header class="bg-primary">
+			<div class="fill">
+				<div class="container">
+					<div class="flex1">
+						<button type="button" class="showSide" aria-label="切换导航"></button>
+						<a class="brand" href="#">ImmortalWrt</a>
+					</div>
+					<div class="status" id="indicators"></div>
+				</div>
+			</div>
+		</header>
+		<div class="darkMask"></div>
+		<div id="maincontent">
+			<div class="container">
+				<div id="tabmenu" style="display:none"></div>
+				<!-- ↓↓↓ 以下 .nv-root 由 overview-preview.html 原样搬运 ↓↓↓ -->
 	<div class="nv-root" id="root">
 		<style id="nvcss"></style>
 
@@ -82,7 +80,11 @@
 			<div class="nv-tablewrap" id="devtab"></div>
 		</div>
 	</div>
-</main>
+				<!-- ↑↑↑ .nv-root 结束 ↑↑↑ -->
+			</div>
+		</div>
+	</div>
+</div>
 
 <script>
 /* ===========================================================================
@@ -788,13 +790,6 @@ for (var i = 0; i < MAXPOINTS; i++) {
 refresh();
 setInterval(refresh, POLL_INTERVAL * 1000);
 
-/* 亮 / 暗切换 */
-var rootEl = document.getElementById('root');
-document.getElementById('tg').addEventListener('click', function() {
-	var dark = rootEl.classList.toggle('nv-force-dark');
-	document.body.classList.toggle('dark', dark);
-	this.textContent = dark ? '切换到亮色模式' : '切换到暗色模式';
-});
 </script>
 </body>
 </html>
