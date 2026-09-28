@@ -7,6 +7,10 @@ dist/
 __pycache__/
 *.py[cod]
 
+# ---- test scratch ----
+# tools/backend.test.sh builds a throwaway fake sysfs tree here
+tools/sandbox/
+
 # ---- editors / OS ----
 .vscode/
 .idea/

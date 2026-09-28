@@ -3,7 +3,8 @@
 # luci-app-netview -- rpcd backend
 #
 # Exposes ubus object "netview" with two methods:
-#   interfaces  -> per-interface realtime rx/tx rate + lifetime counters
+#   interfaces  -> per-interface realtime rx/tx rate + lifetime counters,
+#                  plus WAN addressing details and the connected-client count
 #   devices     -> per-LAN-client traffic aggregated from nf_conntrack
 #
 # Target: ImmortalWrt / OpenWrt 21.02 .. 24.10  (developed for 24.10 x86/64)
@@ -34,8 +35,7 @@ snapshot_if() {
 
 # Resolve the L3 device behind a logical netifd interface (wan / lan).
 # jshn is used rather than jsonfilter: it is already loaded for output, so this
-# keeps the package free of an extra dependency. jshn's default variable prefix
-# is empty, so json_get_var reads the same J_V_* names that `jshn -r` emits.
+# keeps the package free of an extra dependency.
 l3_device() {
 	local iface="$1" dev out
 	out=$(ifstatus "$iface" 2>/dev/null)
@@ -47,6 +47,38 @@ l3_device() {
 	[ -n "$dev" ] || dev=$(uci -q get network."$iface".device)
 	[ -n "$dev" ] || dev=$(uci -q get network."$iface".ifname)
 	printf '%s' "$dev"
+}
+
+# Negotiated link speed in Mbit/s; 0 when unknown (wireless, tunnels, ...).
+# Bridges have no speed of their own, so fall back to a member port.
+if_speed() {
+	local dev="$1" s m
+	s=$(cat "/sys/class/net/$dev/speed" 2>/dev/null)
+	case "$s" in
+		''|*[!0-9]*) ;;
+		*) [ "$s" -gt 0 ] && { printf '%s' "$s"; return; } ;;
+	esac
+	for m in /sys/class/net/"$dev"/brif/*; do
+		[ -e "$m" ] || continue
+		s=$(cat "$m/speed" 2>/dev/null)
+		case "$s" in
+			''|*[!0-9]*) continue ;;
+		esac
+		[ "$s" -gt 0 ] && { printf '%s' "$s"; return; }
+	done
+	printf '0'
+}
+
+if_operstate() {
+	local s
+	s=$(cat "/sys/class/net/$1/operstate" 2>/dev/null)
+	printf '%s' "${s:-unknown}"
+}
+
+# "192.168.9.231/24" for the first global address of a device, empty if none.
+addr_of() {
+	local dev="$1" fam="$2"
+	ip -"$fam" -o addr show dev "$dev" scope global 2>/dev/null | awk 'NR == 1 { print $4 }'
 }
 
 # Classify an interface name into WAN / LAN / ""
@@ -66,13 +98,25 @@ if_role() {
 	esac
 }
 
+# All logical roles a device carries, comma separated: "WAN,WAN6" / "LAN".
+if_roles() {
+	local name="$1" out=""
+	[ -n "$2" ] && [ "$name" = "$2" ] && out="${out}WAN,"
+	[ -n "$3" ] && [ "$name" = "$3" ] && out="${out}WAN6,"
+	[ -n "$4" ] && [ "$name" = "$4" ] && out="${out}LAN,"
+	printf '%s' "${out%,}"
+}
+
 # ------------------------------------------------------------- interfaces ---
 
 do_interfaces() {
-	local now wan lan
+	local now wan lan wan6 clients wip wproto wuptime wup connected
+	local w4 w_ip4 w_mask4 w_ip6 w_gw w_dns w_dnsauto dnsfile peers
+
 	now=$(date +%s)
 	wan=$(l3_device wan)
 	lan=$(l3_device lan)
+	wan6=$(l3_device wan6)
 	[ -n "$lan" ] || lan="br-lan"
 
 	snapshot_if > "$TMP_SNAP"
@@ -100,17 +144,78 @@ do_interfaces() {
 	# Persist this sample for the next round
 	{ echo "$now"; cat "$TMP_SNAP"; } > "$STATE_IF"
 
+	# ---- WAN details -------------------------------------------------------
+	# Everything below is gathered *before* json_init() opens the output
+	# document: jshn keeps its state in global shell variables, so an inner
+	# json_load() would otherwise clobber the object under construction.
+	wup=""; wproto=""; wuptime=""
+	if [ -n "$wan" ]; then
+		local j
+		j=$(ifstatus wan 2>/dev/null)
+		if [ -n "$j" ]; then
+			json_init
+			json_load "$j"
+			json_get_var wup up
+			json_get_var wproto proto
+			json_get_var wuptime uptime
+		fi
+	fi
+
+	connected=0
+	[ "$wup" = "1" ] || [ "$wup" = "true" ] && connected=1
+
+	w_ip4=""; w_mask4=""; w_ip6=""; w_gw=""
+	if [ -n "$wan" ]; then
+		w4=$(addr_of "$wan" 4)
+		[ -n "$w4" ] && { w_ip4="${w4%%/*}"; w_mask4="${w4##*/}"; }
+		w_ip6=$(addr_of "$wan" 6 | cut -d/ -f1)
+		w_gw=$(ip -4 route show default dev "$wan" 2>/dev/null | awk 'NR == 1 { print $3 }')
+	fi
+
+	# DNS servers actually handed to dnsmasq by netifd
+	dnsfile="/tmp/resolv.conf.d/resolv.conf.auto"
+	[ -r "$dnsfile" ] || dnsfile="/tmp/resolv.conf"
+	w_dns=$(awk '/^nameserver/ { printf "%s ", $2 }' "$dnsfile" 2>/dev/null)
+	w_dns=${w_dns% }
+
+	w_dnsauto=1
+	peers=$(uci -q get network.wan.peerdns)
+	[ "$peers" = "0" ] && w_dnsauto=0
+
+	# Connected clients = complete ARP entries
+	clients=$(awk 'NR > 1 && $3 == "0x2" { print $1 }' /proc/net/arp 2>/dev/null | sort -u | wc -l)
+	: "${clients:=0}"
+
+	# ---- emit --------------------------------------------------------------
 	json_init
 	json_add_int "timestamp" "$now"
 	json_add_string "wan" "$wan"
 	json_add_string "lan" "$lan"
+	json_add_int "clients" "$clients"
+
+	json_add_object "wan_info"
+	json_add_boolean "connected" "$connected"
+	json_add_int     "uptime" "${wuptime:-0}"
+	json_add_string  "proto" "$wproto"
+	json_add_string  "device" "$wan"
+	json_add_string  "ipv4" "$w_ip4"
+	json_add_int     "mask" "${w_mask4:-0}"
+	json_add_string  "ipv6" "$w_ip6"
+	json_add_string  "gateway" "$w_gw"
+	json_add_string  "dns" "$w_dns"
+	json_add_boolean "dns_auto" "$w_dnsauto"
+	json_close_object
+
 	json_add_array "interfaces"
 
 	while read -r name rx tx drx dtx; do
 		[ -n "$name" ] || continue
 		json_add_object
-		json_add_string "name" "$name"
-		json_add_string "role" "$(if_role "$name" "$wan" "$lan")"
+		json_add_string "name"  "$name"
+		json_add_string "role"  "$(if_role "$name" "$wan" "$lan")"
+		json_add_string "roles" "$(if_roles "$name" "$wan" "$wan6" "$lan")"
+		json_add_string "state" "$(if_operstate "$name")"
+		json_add_int    "speed" "$(if_speed "$name")"
 		json_add_int    "rx" "$rx"
 		json_add_int    "tx" "$tx"
 		json_add_double "rx_rate" "$drx"

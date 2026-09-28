@@ -6,17 +6,30 @@
 /*
  * luci-app-netview -- realtime traffic overview
  *
- * Interface cards  : per-interface rx/tx rate + lifetime counters + sparkline
- * Device ranking   : LAN clients ranked by aggregated conntrack traffic
+ * Layout (modelled on the iStoreOS QuickStart page):
  *
- * Data is kept in memory only (no persistence) -- history holds the last
- * MAXPOINTS samples, i.e. roughly 3 minutes at a 3 second poll interval.
+ *   +---------------------------------------+----------------------+
+ *   | 流量统计   [download][upload]   now:  |  已连接互联网          |
+ *   |                                       |  N 已连接设备          |
+ *   |        large gradient area chart      |  IP 地址 / DNS        |
+ *   |                                       |  网络接口状态 (tiles)  |
+ *   +---------------------------------------+----------------------+
+ *   | 网络接口 -- per-interface rate + sparkline + lifetime counters |
+ *   | 设备流量排行 -- LAN clients ranked by aggregated conntrack bytes|
  *
- * Styling follows luci-theme-argon design tokens (--oc-* CSS variables):
- * argon switches between cascade.css and dark.css, both of which redefine the
- * whole --oc-* set, so consuming those variables gives automatic light/dark
- * support. Every var() carries a fallback so the view still looks sane on
- * themes that do not define them.
+ * The hero chart aggregates all WAN-role interfaces (falling back to every
+ * interface when no WAN could be identified), so "traffic" here means what
+ * actually crosses the uplink.
+ *
+ * History lives in memory only: MAXPOINTS samples, i.e. ~3 minutes at a 3
+ * second poll interval.
+ *
+ * Styling is self-contained: every colour resolves through a --nv-* custom
+ * property declared on .nv-root, whose default is itself var(--oc-*, <light
+ * value>). Argon (and any theme that defines --oc-surface / --oc-text / ...)
+ * therefore still drives surfaces and text, while the iStoreOS-inspired
+ * fallbacks keep the page looking right on themes that define nothing.
+ * A prefers-color-scheme block swaps the fallbacks for dark values.
  */
 
 var callInterfaces = rpc.declare({
@@ -30,103 +43,214 @@ var callDevices = rpc.declare({
 });
 
 var POLL_INTERVAL = 3;
-var MAXPOINTS = 60;
+var MAXPOINTS = 60;          /* 60 * 3 s = 3 minutes */
 var MAX_DEVICES = 20;
 
-var history = {};
+/* iStoreOS-inspired data colours. Deliberately fixed rather than derived from
+ * the theme accent: they identify the two series across light and dark. */
+var C_DOWN = '#4a9df5';
+var C_UP   = '#8b5cf6';
+
+/* A floor keeps an idle link from scaling its own noise to full height. */
+var SCALE_FLOOR = 32 * 1024;
+
+var heroHist = [];           /* aggregate samples */
+var ifHist = {};             /* per-interface samples */
+var yScale = 0;              /* smoothed vertical scale (B/s) */
 
 var CSS = [
-	'.nv-root { padding: 2px 0 26px; }',
+	/* ---- tokens ---- */
+	'.nv-root {',
+	'  --nv-bg:     var(--oc-surface-muted, #f2f4f8);',
+	'  --nv-card:   var(--oc-surface, #ffffff);',
+	'  --nv-border: var(--oc-border, #ecedf3);',
+	'  --nv-text:   var(--oc-text, #2b3445);',
+	'  --nv-muted:  var(--oc-text-muted, #8a94a6);',
+	'  --nv-dn:     ' + C_DOWN + ';',
+	'  --nv-up:     ' + C_UP + ';',
+	'  --nv-ok:     #22c55e;',
+	'  --nv-off:    #b9c0cd;',
+	'  --nv-radius: 14px;',
+	'  --nv-shadow: 0 1px 2px rgba(16,24,40,.04), 0 10px 28px rgba(16,24,40,.06);',
+	'  color: var(--nv-text); font-size: 13px; line-height: 1.5;',
+	'  padding: 2px 0 28px;',
+	'}',
+	'@media (prefers-color-scheme: dark) {',
+	'  .nv-root {',
+	'    --nv-bg:     var(--oc-surface-muted, #14161c);',
+	'    --nv-card:   var(--oc-surface, #1c1f27);',
+	'    --nv-border: var(--oc-border, #2b3038);',
+	'    --nv-text:   var(--oc-text, #d8dce4);',
+	'    --nv-muted:  var(--oc-text-muted, #8a93a5);',
+	'    --nv-off:    #5b6373;',
+	'    --nv-shadow: 0 1px 2px rgba(0,0,0,.35), 0 10px 28px rgba(0,0,0,.28);',
+	'  }',
+	'}',
 
-	/* ---- header ---- */
-	'.nv-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 12px;',
-	'           margin: 0 0 16px; }',
-	'.nv-head h2 { margin: 0; font-size: 19px; font-weight: 500;',
-	'              color: var(--oc-text, #525f7f); }',
-	'.nv-sub { font-size: 12px; color: var(--oc-text-muted, #8898aa); }',
-	'.nv-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;',
-	'          background: var(--success, #2dce89); margin-right: 6px;',
-	'          vertical-align: baseline; }',
+	/* ---- generic card ---- */
+	'.nv-card { background: var(--nv-card); border: 1px solid var(--nv-border);',
+	'           border-radius: var(--nv-radius); box-shadow: var(--nv-shadow); }',
 
-	/* ---- interface cards ---- */
-	'.nv-grid { display: grid; gap: 14px;',
-	'           grid-template-columns: repeat(auto-fill, minmax(252px, 1fr)); }',
-	'.nv-card { background: var(--oc-surface, #fff);',
-	'           border: 1px solid var(--oc-border, #dee2e6);',
-	'           border-radius: 4px; padding: 14px 16px 12px;',
-	'           transition: box-shadow .2s ease, transform .2s ease; }',
-	'.nv-card:hover { box-shadow: 3px 4px 8px rgba(94, 114, 228, .16);',
-	'                 transform: translateY(-1px); }',
+	/* ---- page head ---- */
+	'.nv-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px;',
+	'           margin: 0 2px 14px; }',
+	'.nv-head h2 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: .01em; }',
+	'.nv-head .nv-sub { font-size: 11.5px; color: var(--nv-muted); }',
+	'.nv-live { display: inline-block; width: 6px; height: 6px; border-radius: 50%;',
+	'           background: var(--nv-ok); margin-right: 5px; vertical-align: 1px; }',
 
-	'.nv-card-hd { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }',
-	'.nv-ifname { font-size: 13px; font-weight: 500; color: var(--oc-text, #525f7f);',
+	/* ---- hero grid ---- */
+	'.nv-hero { display: grid; gap: 16px; align-items: start;',
+	'           grid-template-columns: minmax(0, 1fr) 344px; }',
+	'@media (max-width: 1000px) { .nv-hero { grid-template-columns: minmax(0, 1fr); } }',
+
+	/* ---- hero chart ---- */
+	'.nv-chartcard { padding: 16px 18px 10px; }',
+	'.nv-chart-hd { display: flex; align-items: center; flex-wrap: wrap;',
+	'               gap: 6px 14px; margin-bottom: 4px; }',
+	'.nv-chart-title { font-size: 14.5px; font-weight: 600; }',
+	'.nv-legend { display: flex; align-items: center; gap: 16px;',
+	'             font-size: 12px; color: var(--nv-muted); }',
+	'.nv-lg { display: inline-flex; align-items: center; gap: 7px; }',
+	'.nv-lg i { display: inline-block; width: 22px; height: 3px; border-radius: 2px; }',
+	'.nv-lg i.nv-dn { background: var(--nv-dn); }',
+	'.nv-lg i.nv-up { background: var(--nv-up); }',
+	'.nv-now { margin-left: auto; display: flex; gap: 18px;',
+	'          font-size: 11.5px; color: var(--nv-muted); white-space: nowrap; }',
+	'.nv-now b { margin-left: 5px; font-weight: 600; color: var(--nv-text);',
+	'            font-variant-numeric: tabular-nums; }',
+
+	'.nv-chartwrap { margin: 0 -4px; }',
+	'.nv-chart { display: block; width: 100%; height: 292px; }',
+	'.nv-chart-empty { height: 292px; display: flex; align-items: center;',
+	'                  justify-content: center; font-size: 12.5px;',
+	'                  color: var(--nv-muted); }',
+
+	/* ---- side column ---- */
+	'.nv-side { display: flex; flex-direction: column; gap: 16px; }',
+
+	'.nv-mini { display: flex; align-items: center; gap: 13px; padding: 15px 17px; }',
+	'.nv-ico { flex: 0 0 auto; width: 36px; height: 36px; border-radius: 11px;',
+	'          display: flex; align-items: center; justify-content: center;',
+	'          color: #fff; }',
+	'.nv-ico.violet { background: linear-gradient(135deg, #9b7bf8, #7c4dee); }',
+	'.nv-ico.cyan   { background: linear-gradient(135deg, #34d8ee, #0ea5c9); }',
+	'.nv-ico.red    { background: linear-gradient(135deg, #fb8a8a, #ef4444); }',
+	'.nv-mini-t { font-size: 13.5px; font-weight: 600; }',
+	'.nv-mini-s { font-size: 11px; color: var(--nv-muted); margin-top: 1px; }',
+	'.nv-mini-n { font-size: 23px; font-weight: 600; line-height: 1.1;',
+	'             font-variant-numeric: tabular-nums; }',
+
+	'.nv-info { padding: 15px 17px 17px; }',
+	'.nv-info-hd { font-size: 13px; font-weight: 600; margin-bottom: 11px;',
+	'              display: flex; align-items: center; gap: 8px; }',
+	'.nv-info-hd .nv-tag { font-size: 10.5px; font-weight: 500; color: var(--nv-muted);',
+	'                      border: 1px solid var(--nv-border); border-radius: 999px;',
+	'                      padding: 1px 8px; }',
+	'.nv-row { display: flex; gap: 9px; font-size: 12.5px; margin-bottom: 9px;',
+	'          align-items: baseline; }',
+	'.nv-row:last-child { margin-bottom: 0; }',
+	'.nv-row-k { flex: 0 0 auto; min-width: 46px; color: var(--nv-muted); }',
+	'.nv-row-v { min-width: 0; word-break: break-all; }',
+	'.nv-row-v em { font-style: normal; color: var(--nv-muted); }',
+
+	/* ---- interface tiles ---- */
+	'.nv-tiles { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }',
+	'.nv-tile { display: flex; align-items: center; gap: 7px; padding: 9px 10px;',
+	'           border-radius: 11px; background: var(--nv-bg);',
+	'           border: 1px solid var(--nv-border); }',
+	'.nv-tile-ico { flex: 0 0 auto; color: var(--nv-muted); line-height: 0; }',
+	/* "eth0（WAN,WAN6）" needs ~90px and a half column only offers ~105px of
+	 * content box, so the glyph stays at 20px and the name at 10px */
+	'.nv-tile-ico svg { width: 20px; height: 20px; }',
+	'.nv-tile-t { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums;',
+	'             white-space: nowrap; }',
+	'.nv-tile-s { font-size: 10px; color: var(--nv-muted); margin-top: 1px;',
 	'             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
-	'.nv-badge { flex: 0 0 auto; padding: 2px 7px; border-radius: 3px;',
-	'            font-size: 10px; font-weight: 500; line-height: 1.4;',
-	'            letter-spacing: .04em; color: #fff; }',
-	'.nv-badge.nv-wan { background: var(--oc-accent, #5e72e4); }',
-	'.nv-badge.nv-lan { background: var(--success, #2dce89); }',
 
-	'.nv-rates { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-bottom: 8px; }',
-	'.nv-rate { display: flex; align-items: baseline; gap: 5px; min-width: 0; }',
-	'.nv-arrow { font-size: 13px; line-height: 1; }',
-	'.nv-c-dn { color: var(--oc-accent, #5e72e4); }',
-	'.nv-c-up { color: var(--warning, #fb6340); }',
-	'.nv-num { font-size: 16px; font-weight: 500; white-space: nowrap;',
-	'          font-variant-numeric: tabular-nums;',
-	'          color: var(--oc-text, #525f7f); }',
+	/* ---- sections ---- */
+	'.nv-sec { margin-top: 18px; }',
+	'.nv-sec-hd { display: flex; align-items: baseline; gap: 10px; margin: 0 2px 10px; }',
+	'.nv-sec-hd h3 { margin: 0; font-size: 14px; font-weight: 600; }',
+	'.nv-sec-hd span { font-size: 11.5px; color: var(--nv-muted); }',
 
-	'.nv-spark { display: block; width: 100%; height: 44px; margin: 2px 0 10px; }',
-	'.nv-spark path { fill: none; }',
-	'.nv-spark .nv-a-d { fill: var(--oc-accent-a10, rgba(94, 114, 228, .12)); }',
-	'.nv-spark .nv-l-d { stroke: var(--oc-accent, #5e72e4); }',
-	'.nv-spark .nv-l-u { stroke: var(--warning, #fb6340); }',
-
-	'.nv-total { display: flex; justify-content: space-between; gap: 10px;',
-	'            font-size: 11px; color: var(--oc-text-muted, #8898aa); }',
-	'.nv-total b { font-weight: 500; color: var(--oc-text, #525f7f);',
-	'              font-variant-numeric: tabular-nums; }',
-
-	/* ---- device table ---- */
-	'.nv-h3 { font-size: 15px; font-weight: 500; margin: 26px 0 12px;',
-	'         color: var(--oc-text, #525f7f); }',
-	'.nv-tablewrap { overflow-x: auto; border-radius: 4px;',
-	'                border: 1px solid var(--oc-border, #dee2e6);',
-	'                background: var(--oc-surface, #fff); }',
-	'.nv-table { width: 100%; border-collapse: collapse; font-size: 13px; }',
-	'.nv-table th { text-align: left; padding: 9px 12px; white-space: nowrap;',
-	'               font-size: 11px; font-weight: 500; text-transform: uppercase;',
-	'               letter-spacing: .04em; color: var(--oc-text-muted, #8898aa);',
-	'               background: var(--oc-surface-muted, #f6f9fc);',
-	'               border-bottom: 1px solid var(--oc-border, #dee2e6); }',
-	'.nv-table td { padding: 9px 12px; vertical-align: middle;',
-	'               color: var(--oc-text, #525f7f);',
-	'               border-bottom: 1px solid var(--oc-border, #dee2e6); }',
+	/* ---- tables ---- */
+	'.nv-tablewrap { overflow-x: auto; border-radius: var(--nv-radius);',
+	'                background: var(--nv-card); border: 1px solid var(--nv-border);',
+	'                box-shadow: var(--nv-shadow); }',
+	'.nv-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }',
+	'.nv-table th { text-align: left; padding: 10px 14px; white-space: nowrap;',
+	'               font-size: 11px; font-weight: 600; letter-spacing: .03em;',
+	'               color: var(--nv-muted); background: var(--nv-bg);',
+	'               border-bottom: 1px solid var(--nv-border); }',
+	'.nv-table td { padding: 10px 14px; vertical-align: middle;',
+	'               border-bottom: 1px solid var(--nv-border); }',
 	'.nv-table tbody tr:last-child td { border-bottom: none; }',
 	'.nv-table tbody tr { transition: background .15s ease; }',
-	'.nv-table tbody tr:hover { background: var(--oc-surface-muted, #f6f9fc); }',
-	'.nv-devname { font-weight: 500; }',
-	'.nv-tnum { font-variant-numeric: tabular-nums; }',
-	'.nv-bar-cell { min-width: 190px; }',
-	'.nv-bar { height: 5px; border-radius: 3px; overflow: hidden; margin-bottom: 5px;',
-	'          background: var(--oc-border, #dee2e6); }',
-	'.nv-bar i { display: block; height: 100%; border-radius: 3px;',
-	'            background: var(--oc-accent, #5e72e4);',
-	'            transition: width .3s ease; }',
+	'.nv-table tbody tr:hover { background: var(--nv-bg); }',
+	/* needs the element in the selector: ".nv-table th" alone would outrank
+	 * a bare ".nv-th-r" class and keep the header left aligned */
+	'.nv-table th.nv-th-r, .nv-table td.nv-r { text-align: right; }',
+	'.nv-num { font-variant-numeric: tabular-nums; white-space: nowrap; }',
+	'.nv-dn { color: var(--nv-dn); }',
+	'.nv-up { color: var(--nv-up); }',
+	'.nv-ifname { font-weight: 600; }',
+	'.nv-devname { font-weight: 600; }',
+	'.nv-devip { color: var(--nv-muted); font-variant-numeric: tabular-nums; }',
 
-	'.nv-empty { padding: 26px; text-align: center; font-size: 13px;',
-	'            border-radius: 4px; border: 1px dashed var(--oc-border, #dee2e6);',
-	'            background: var(--oc-surface, #fff);',
-	'            color: var(--oc-text-muted, #8898aa); }',
-	'.nv-hint { display: block; margin-top: 7px; font-size: 11px; }',
-	'.nv-empty code { font-size: 12px; padding: 1px 6px; border-radius: 3px;',
-	'                 background: var(--oc-surface-muted, #f6f9fc); }'
+	'.nv-badge { display: inline-block; margin-left: 7px; padding: 1px 7px;',
+	'            border-radius: 999px; font-size: 10px; font-weight: 600;',
+	'            letter-spacing: .03em; vertical-align: 1px;',
+	'            color: #fff; background: var(--nv-dn); }',
+	'.nv-badge.lan { background: var(--nv-ok); }',
+	'.nv-badge.none { background: var(--nv-off); }',
+
+	'.nv-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;',
+	'          background: var(--nv-off); margin-right: 6px; vertical-align: 1px; }',
+	'.nv-dot.up { background: var(--nv-ok); }',
+	'.nv-muted { color: var(--nv-muted); }',
+
+	'.nv-spark { display: block; width: 120px; height: 30px; }',
+
+	'.nv-track { height: 5px; border-radius: 3px; overflow: hidden;',
+	'            background: var(--nv-border); margin-bottom: 5px; }',
+	'.nv-track i { display: block; height: 100%; border-radius: 3px;',
+	'              background: linear-gradient(90deg, var(--nv-dn), var(--nv-up));',
+	'              transition: width .35s ease; }',
+
+	'.nv-empty { padding: 30px 20px; text-align: center; font-size: 12.5px;',
+	'            color: var(--nv-muted); background: var(--nv-card);',
+	'            border: 1px dashed var(--nv-border); border-radius: var(--nv-radius); }',
+	'.nv-hint { display: block; margin-top: 8px; font-size: 11.5px; }',
+	'.nv-empty code { padding: 1px 6px; border-radius: 4px; font-size: 12px;',
+	'                 background: var(--nv-bg); color: var(--nv-text); }'
 ].join('\n');
+
+/* ------------------------------------------------------------------ icons --- */
+
+var ICON = {
+	check: '<svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"' +
+		' stroke-width="3" stroke-linecap="round" stroke-linejoin="round">' +
+		'<path d="M5 12.5l4.5 4.5L19 7"/></svg>',
+	cross: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"' +
+		' stroke-width="3" stroke-linecap="round" stroke-linejoin="round">' +
+		'<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg>',
+	users: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"' +
+		' stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">' +
+		'<circle cx="9.2" cy="8" r="3.3"/><path d="M3.4 19.2c0-3.1 2.6-5.3 5.8-5.3s5.8 2.2 5.8 5.3"/>' +
+		'<path d="M16.2 5.6a3.1 3.1 0 0 1 0 5.9"/><path d="M17.3 14c2.3.5 3.7 2.4 3.7 4.6"/></svg>',
+	nic: '<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor"' +
+		' stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' +
+		'<rect x="2.5" y="6" width="19" height="12" rx="2.2"/>' +
+		'<path d="M6.6 10v4"/><path d="M9.6 10v4"/>' +
+		'<rect x="14" y="9.8" width="4.6" height="4.4" rx="1.1"/></svg>'
+};
 
 /* ------------------------------------------------------------- formatting --- */
 
 function fmtBytes(n) {
 	n = Number(n) || 0;
+	if (n < 0) n = 0;
 	var units = [ 'B', 'KB', 'MB', 'GB', 'TB', 'PB' ];
 	var i = 0;
 	while (n >= 1024 && i < units.length - 1) {
@@ -140,6 +264,36 @@ function fmtRate(n) {
 	return fmtBytes(n) + '/s';
 }
 
+function fmtDuration(sec) {
+	sec = Math.max(0, Math.floor(Number(sec) || 0));
+	var d = Math.floor(sec / 86400),
+	    h = Math.floor(sec % 86400 / 3600),
+	    m = Math.floor(sec % 3600 / 60),
+	    s = sec % 60;
+
+	if (d > 0) return d + ' 天 ' + h + ' 小时';
+	if (h > 0) return h + ' 小时 ' + m + ' 分';
+	if (m > 0) return m + ' 分 ' + s + ' 秒';
+	return s + ' 秒';
+}
+
+function fmtSpeed(mbit) {
+	var n = Number(mbit) || 0;
+	if (n <= 0) return '—';
+	return n + ' Mbit/s';
+}
+
+function fmtProto(p) {
+	switch (p) {
+		case 'dhcp':   return 'DHCP';
+		case 'pppoe':  return 'PPPoE';
+		case 'static': return '静态';
+		case 'none':
+		case '':       return '';
+		default:       return String(p).toUpperCase();
+	}
+}
+
 function esc(s) {
 	return String(s == null ? '' : s)
 		.replace(/&/g, '&amp;')
@@ -148,13 +302,131 @@ function esc(s) {
 		.replace(/"/g, '&quot;');
 }
 
-/* -------------------------------------------------------------- sparkline --- */
+function truthy(v) {
+	return v === true || v === 1 || v === '1' || v === 'true';
+}
 
-function sparkline(points) {
-	var W = 200, H = 44;
+/* ---------------------------------------------------------- path building --- */
+
+/* Catmull-Rom -> cubic Bezier. The 0.18 tension is low enough that the curve
+ * stays close to the data while still reading as the smooth iStoreOS style;
+ * the caller clips the result so any overshoot cannot escape the plot box. */
+function smoothPath(pts) {
+	if (!pts.length)
+		return '';
+	if (pts.length === 1)
+		return 'M' + pts[0][0].toFixed(1) + ',' + pts[0][1].toFixed(1);
+
+	var d = 'M' + pts[0][0].toFixed(1) + ',' + pts[0][1].toFixed(1);
+	var t = 0.18;
+
+	for (var i = 0; i < pts.length - 1; i++) {
+		var p0 = pts[i - 1] || pts[i];
+		var p1 = pts[i];
+		var p2 = pts[i + 1];
+		var p3 = pts[i + 2] || p2;
+
+		var c1x = p1[0] + (p2[0] - p0[0]) * t;
+		var c1y = p1[1] + (p2[1] - p0[1]) * t;
+		var c2x = p2[0] - (p3[0] - p1[0]) * t;
+		var c2y = p2[1] - (p3[1] - p1[1]) * t;
+
+		d += ' C' + c1x.toFixed(1) + ',' + c1y.toFixed(1) +
+		     ' '  + c2x.toFixed(1) + ',' + c2y.toFixed(1) +
+		     ' '  + p2[0].toFixed(1) + ',' + p2[1].toFixed(1);
+	}
+
+	return d;
+}
+
+function pointsOf(hist, key, W, H, pad, max) {
+	var n = hist.length, out = [], inner = H - pad * 2;
+	for (var i = 0; i < n; i++) {
+		var v = Math.min(1, (Number(hist[i][key]) || 0) / max);
+		out.push([ pad + (i / (n - 1)) * (W - pad * 2), H - pad - v * inner ]);
+	}
+	return out;
+}
+
+function areaPath(pts, baseY) {
+	if (!pts.length)
+		return '';
+	return smoothPath(pts) +
+		' L' + pts[pts.length - 1][0].toFixed(1) + ',' + baseY +
+		' L' + pts[0][0].toFixed(1) + ',' + baseY + ' Z';
+}
+
+/* Round a peak up to a readable scale so the curve does not jitter when the
+ * throughput hovers around a threshold.
+ *
+ * The mantissa ladder is deliberately fine-grained: with a coarse 1/2/2.5/5
+ * ladder a 2.8 MB/s peak snaps to 5 MB/s and the curve only ever reaches 56%
+ * of the height, which wastes half the card. */
+function niceMax(v) {
+	if (!(v > 0)) return SCALE_FLOOR;
+	var e = Math.pow(10, Math.floor(Math.log(v) / Math.LN10));
+	var m = v / e;
+	var ladder = [ 1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10 ];
+	for (var i = 0; i < ladder.length; i++)
+		if (m <= ladder[i] + 1e-9)
+			return ladder[i] * e;
+	return 10 * e;
+}
+
+/* ------------------------------------------------------------ hero chart --- */
+
+function chartSvg(hist) {
+	var W = 900, H = 292, PAD = 6;
+
+	if (hist.length < 2)
+		return '<div class="nv-chart-empty">正在采集数据…（首次采样没有基准值，约 ' +
+			POLL_INTERVAL + ' 秒后出现曲线）</div>';
+
+	var peak = 0;
+	hist.forEach(function(p) {
+		if (p.d > peak) peak = p.d;
+		if (p.u > peak) peak = p.u;
+	});
+
+	var target = niceMax(Math.max(peak * 1.08, SCALE_FLOOR));
+	yScale = yScale ? yScale + (target - yScale) * 0.35 : target;
+	if (Math.abs(target - yScale) < target * 0.02) yScale = target;
+
+	var baseY = H - PAD;
+	var dn = areaPath(pointsOf(hist, 'd', W, H, PAD, yScale), baseY);
+	var up = areaPath(pointsOf(hist, 'u', W, H, PAD, yScale), baseY);
+
+	/* Download is painted first, upload on top: the overlap blends into the
+	 * purple band the reference design shows along the bottom. */
+	return '<svg class="nv-chart" viewBox="0 0 ' + W + ' ' + H + '"' +
+		' preserveAspectRatio="none" role="img" aria-label="实时流量曲线">' +
+		'<defs>' +
+			'<linearGradient id="nvGDn" gradientUnits="userSpaceOnUse"' +
+				' x1="0" y1="0" x2="0" y2="' + H + '">' +
+				'<stop offset="0%" stop-color="' + C_DOWN + '" stop-opacity=".55"/>' +
+				'<stop offset="100%" stop-color="' + C_DOWN + '" stop-opacity=".08"/>' +
+			'</linearGradient>' +
+			'<linearGradient id="nvGUp" gradientUnits="userSpaceOnUse"' +
+				' x1="0" y1="0" x2="0" y2="' + H + '">' +
+				'<stop offset="0%" stop-color="' + C_UP + '" stop-opacity=".80"/>' +
+				'<stop offset="100%" stop-color="' + C_UP + '" stop-opacity=".16"/>' +
+			'</linearGradient>' +
+			'<clipPath id="nvClip"><rect x="0" y="0" width="' + W + '" height="' + baseY + '"/></clipPath>' +
+		'</defs>' +
+		'<g clip-path="url(#nvClip)">' +
+			'<path d="' + dn + '" fill="url(#nvGDn)"/>' +
+			'<path d="' + up + '" fill="url(#nvGUp)"/>' +
+		'</g>' +
+	'</svg>';
+}
+
+/* ---------------------------------------------------------- table spark --- */
+
+function sparkSvg(points) {
+	var W = 120, H = 30, PAD = 2;
 
 	if (!points || points.length < 2)
-		return '<svg class="nv-spark" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none"></svg>';
+		return '<svg class="nv-spark" viewBox="0 0 ' + W + ' ' + H + '"></svg>';
 
 	var max = 1;
 	points.forEach(function(p) {
@@ -162,79 +434,158 @@ function sparkline(points) {
 		if (p.u > max) max = p.u;
 	});
 
-	function line(key) {
-		var n = points.length, out = [];
-		for (var i = 0; i < n; i++) {
-			var x = (i / (n - 1)) * W;
-			var y = H - 2 - (points[i][key] / max) * (H - 5);
-			out.push((i ? 'L' : 'M') + x.toFixed(1) + ',' + y.toFixed(1));
-		}
-		return out.join(' ');
-	}
-
-	var downLine = line('d');
+	var dn = pointsOf(points, 'd', W, H, PAD, max);
+	var up = pointsOf(points, 'u', W, H, PAD, max);
 
 	return '<svg class="nv-spark" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none">' +
-		'<path class="nv-a-d" d="' + downLine + ' L' + W + ',' + H + ' L0,' + H + ' Z"/>' +
-		'<path class="nv-l-d" d="' + downLine + '" stroke-width="1.5" ' +
-			'vector-effect="non-scaling-stroke"/>' +
-		'<path class="nv-l-u" d="' + line('u') + '" stroke-width="1.5" ' +
-			'vector-effect="non-scaling-stroke"/>' +
+		'<path d="' + areaPath(dn, H - PAD) + '" fill="' + C_DOWN + '" opacity=".22"/>' +
+		'<path d="' + smoothPath(dn) + '" fill="none" stroke="' + C_DOWN + '"' +
+			' stroke-width="1.6" vector-effect="non-scaling-stroke"/>' +
+		'<path d="' + smoothPath(up) + '" fill="none" stroke="' + C_UP + '"' +
+			' stroke-width="1.6" vector-effect="non-scaling-stroke"/>' +
 	'</svg>';
 }
 
-/* ---------------------------------------------------------- interface view --- */
+/* ------------------------------------------------------------ side column --- */
 
-function renderInterfaces(box, data) {
-	if (!data || !data.interfaces)
-		return;
+function roleBadge(it) {
+	var r = it.role;
+	if (!r) return '';
+	return '<span class="nv-badge' + (r === 'LAN' ? ' lan' : '') + '">' + esc(r) + '</span>';
+}
 
-	var order = { 'WAN': 0, 'LAN': 1, '': 2 };
-	var list = data.interfaces.slice(0).sort(function(a, b) {
+function sideHtml(d) {
+	var wi = d.wan_info || {};
+	var conn = truthy(wi.connected);
+	var clients = Number(d.clients) || 0;
+
+	/* ---- connectivity ---- */
+	var sub;
+	if (conn)
+		sub = Number(wi.uptime) > 0 ? '已连接 ' + fmtDuration(wi.uptime) : '连接正常';
+	else
+		sub = wi.proto ? 'WAN 未连接' : '正在等待 WAN 拨号';
+
+	var html = '<div class="nv-card nv-mini">' +
+		'<div class="nv-ico ' + (conn ? 'violet' : 'red') + '">' +
+			(conn ? ICON.check : ICON.cross) + '</div>' +
+		'<div><div class="nv-mini-t">' + (conn ? '已连接互联网' : '未连接互联网') + '</div>' +
+			'<div class="nv-mini-s">' + esc(sub) + '</div></div>' +
+	'</div>';
+
+	/* ---- clients ---- */
+	html += '<div class="nv-card nv-mini">' +
+		'<div class="nv-ico cyan">' + ICON.users + '</div>' +
+		'<div><div class="nv-mini-n">' + clients + '</div>' +
+			'<div class="nv-mini-s">已连接设备</div></div>' +
+	'</div>';
+
+	/* ---- WAN addressing ---- */
+	var pl = fmtProto(wi.proto);
+	var rows = '';
+
+	rows += '<div class="nv-row"><span class="nv-row-k">IPv4</span>' +
+		'<span class="nv-row-v">' + (wi.ipv4
+			? esc(wi.ipv4) + (pl ? ' <em>（' + esc(pl) + '）</em>' : '')
+			: '<em>未获取</em>') + '</span></div>';
+
+	if (wi.ipv6)
+		rows += '<div class="nv-row"><span class="nv-row-k">IPv6</span>' +
+			'<span class="nv-row-v">' + esc(wi.ipv6) + '</span></div>';
+
+	rows += '<div class="nv-row"><span class="nv-row-k">DNS</span>' +
+		'<span class="nv-row-v">' + (wi.dns
+			? esc(wi.dns) + ' <em>（' + (truthy(wi.dns_auto) ? '自动获取' : '手动指定') + '）</em>'
+			: '<em>未配置</em>') + '</span></div>';
+
+	html += '<div class="nv-card nv-info">' +
+		'<div class="nv-info-hd">IP 地址（' + esc(d.wan || 'wan') + '）</div>' + rows +
+	'</div>';
+
+	/* ---- interface tiles: physical-ish links, WAN first ---- */
+	var order = { 'WAN': 0, 'LAN': 1 };
+	var links = (d.interfaces || []).filter(function(it) {
+		return it.role || Number(it.speed) > 0;
+	}).sort(function(a, b) {
+		var oa = order[a.role] != null ? order[a.role] : 2;
+		var ob = order[b.role] != null ? order[b.role] : 2;
+		if (oa !== ob) return oa - ob;
+		return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
+	}).slice(0, 6);
+
+	if (links.length) {
+		var tiles = links.map(function(it) {
+			var roles = it.roles || it.role || '';
+			return '<div class="nv-tile">' +
+				'<span class="nv-tile-ico">' + ICON.nic + '</span>' +
+				'<div style="min-width:0">' +
+					'<div class="nv-tile-t">' + fmtSpeed(it.speed) + '</div>' +
+					'<div class="nv-tile-s" title="' + esc(it.name + (roles ? '（' + roles + '）' : '')) + '">' +
+						esc(it.name) + (roles ? '（' + esc(roles) + '）' : '') + '</div>' +
+				'</div>' +
+			'</div>';
+		}).join('');
+
+		html += '<div class="nv-card nv-info">' +
+			'<div class="nv-info-hd">网络接口状态' +
+				'<span class="nv-tag">' + links.length + '</span></div>' +
+			'<div class="nv-tiles">' + tiles + '</div>' +
+		'</div>';
+	}
+
+	return html;
+}
+
+/* --------------------------------------------------------- interface table --- */
+
+function ifTableHtml(d) {
+	var order = { 'WAN': 0, 'LAN': 1 };
+	var list = (d.interfaces || []).slice(0).sort(function(a, b) {
 		var oa = order[a.role] != null ? order[a.role] : 2;
 		var ob = order[b.role] != null ? order[b.role] : 2;
 		if (oa !== ob) return oa - ob;
 		return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
 	});
 
+	if (!list.length)
+		return '<div class="nv-empty">未检测到网络接口</div>';
+
+	var html = '<table class="nv-table"><thead><tr>' +
+		'<th>接口</th><th>状态</th>' +
+		'<th class="nv-th-r">下行</th><th class="nv-th-r">上行</th>' +
+		'<th>最近 3 分钟</th>' +
+		'<th class="nv-th-r">累计收</th><th class="nv-th-r">累计发</th>' +
+	'</tr></thead><tbody>';
+
 	list.forEach(function(it) {
-		var h = history[it.name] || (history[it.name] = []);
-		h.push({ d: Number(it.rx_rate) || 0, u: Number(it.tx_rate) || 0 });
-		while (h.length > MAXPOINTS) h.shift();
+		var h = ifHist[it.name] || [];
+		var up = it.state === 'up';
+
+		html += '<tr>' +
+			'<td><span class="nv-ifname">' + esc(it.name) + '</span>' + roleBadge(it) + '</td>' +
+			'<td class="nv-muted">' +
+				'<span class="nv-dot' + (up ? ' up' : '') + '"></span>' +
+				(up ? '运行中' : '未连接') +
+				(Number(it.speed) > 0 ? ' · ' + Number(it.speed) + 'M' : '') +
+			'</td>' +
+			'<td class="nv-num nv-dn nv-r">' + fmtRate(it.rx_rate) + '</td>' +
+			'<td class="nv-num nv-up nv-r">' + fmtRate(it.tx_rate) + '</td>' +
+			'<td>' + sparkSvg(h) + '</td>' +
+			'<td class="nv-num nv-r">' + fmtBytes(it.rx) + '</td>' +
+			'<td class="nv-num nv-r">' + fmtBytes(it.tx) + '</td>' +
+		'</tr>';
 	});
 
-	var html = '';
-	list.forEach(function(it) {
-		var badge = it.role
-			? '<span class="nv-badge nv-' + it.role.toLowerCase() + '">' + esc(it.role) + '</span>'
-			: '';
-
-		html += '<div class="nv-card">' +
-			'<div class="nv-card-hd">' +
-				'<span class="nv-ifname">' + esc(it.name) + '</span>' + badge +
-			'</div>' +
-			'<div class="nv-rates">' +
-				'<div class="nv-rate"><span class="nv-arrow nv-c-dn">\u2193</span>' +
-					'<span class="nv-num">' + fmtRate(it.rx_rate) + '</span></div>' +
-				'<div class="nv-rate"><span class="nv-arrow nv-c-up">\u2191</span>' +
-					'<span class="nv-num">' + fmtRate(it.tx_rate) + '</span></div>' +
-			'</div>' +
-			sparkline(history[it.name]) +
-			'<div class="nv-total">' +
-				'<span>累计收 <b>' + fmtBytes(it.rx) + '</b></span>' +
-				'<span>累计发 <b>' + fmtBytes(it.tx) + '</b></span>' +
-			'</div>' +
-		'</div>';
-	});
-
-	box.innerHTML = html || '<div class="nv-empty">未检测到网络接口</div>';
+	return html + '</tbody></table>';
 }
 
-/* ------------------------------------------------------------- device view --- */
+/* ------------------------------------------------------------ device table --- */
 
 function renderDevices(box, data) {
-	if (!data)
+	if (!data) {
+		box.innerHTML = '<div class="nv-empty">无法读取设备数据</div>';
 		return;
+	}
 
 	if (data.error === 'conntrack_unavailable') {
 		box.innerHTML = '<div class="nv-empty">内核 conntrack 表不可用，无法统计设备流量</div>';
@@ -265,51 +616,98 @@ function renderDevices(box, data) {
 
 	var max = (list[0].down + list[0].up) || 1;
 
-	var html = '<div class="nv-tablewrap"><table class="nv-table"><thead><tr>' +
-		'<th>设备</th><th>IP</th><th>下行</th><th>上行</th><th>累计流量</th><th>连接数</th>' +
+	var html = '<table class="nv-table"><thead><tr>' +
+		'<th>设备</th><th>IP</th>' +
+		'<th class="nv-th-r">下行</th><th class="nv-th-r">上行</th>' +
+		'<th>累计流量</th><th class="nv-th-r">连接数</th>' +
 	'</tr></thead><tbody>';
 
 	list.forEach(function(d) {
 		var total = d.down + d.up;
-		var pct = Math.max(2, Math.min(100, (total / max) * 100));
+		var pct = Math.max(3, Math.min(100, (total / max) * 100));
 
 		html += '<tr>' +
 			'<td class="nv-devname">' + esc(d.host && d.host !== '-' ? d.host : '未知设备') + '</td>' +
-			'<td class="nv-tnum">' + esc(d.ip) + '</td>' +
-			'<td class="nv-tnum nv-c-dn">' + fmtRate(d.down_rate) + '</td>' +
-			'<td class="nv-tnum nv-c-up">' + fmtRate(d.up_rate) + '</td>' +
-			'<td class="nv-bar-cell">' +
-				'<div class="nv-bar"><i style="width:' + pct.toFixed(1) + '%"></i></div>' +
-				'<span class="nv-tnum">' + fmtBytes(total) + '</span>' +
+			'<td class="nv-devip">' + esc(d.ip) + '</td>' +
+			'<td class="nv-num nv-dn nv-r">' + fmtRate(d.down_rate) + '</td>' +
+			'<td class="nv-num nv-up nv-r">' + fmtRate(d.up_rate) + '</td>' +
+			'<td style="min-width:180px">' +
+				'<div class="nv-track"><i style="width:' + pct.toFixed(1) + '%"></i></div>' +
+				'<span class="nv-num">' + fmtBytes(total) + '</span>' +
 			'</td>' +
-			'<td class="nv-tnum">' + (Number(d.conns) || 0) + '</td>' +
+			'<td class="nv-num nv-r">' + (Number(d.conns) || 0) + '</td>' +
 		'</tr>';
 	});
 
-	html += '</tbody></table></div>';
-	box.innerHTML = html;
+	box.innerHTML = html + '</tbody></table>';
 }
 
-/* -------------------------------------------------------------------- view --- */
+/* ------------------------------------------------------------------- view --- */
+
+/* The hero chart reflects what crosses the uplink, so aggregate WAN-role
+ * interfaces only; if none could be identified fall back to every interface
+ * so the chart is never empty. */
+function aggregate(list) {
+	var wan = (list || []).filter(function(it) { return it.role === 'WAN'; });
+	var src = wan.length ? wan : (list || []);
+	var d = 0, u = 0;
+
+	src.forEach(function(it) {
+		d += Number(it.rx_rate) || 0;
+		u += Number(it.tx_rate) || 0;
+	});
+
+	return { d: d, u: u, scope: wan.length ? 'WAN' : '全部接口' };
+}
 
 return view.extend({
 	render: function() {
-		var ifBox = E('div', { 'class': 'nv-grid' });
-		var devBox = E('div', { 'class': 'nv-devbox' });
+		var chartBox = E('div', { 'class': 'nv-chartwrap' });
+		var nowBox = E('div', { 'class': 'nv-now' });
+		var sideBox = E('div', { 'class': 'nv-side' });
+		var ifBox = E('div', { 'class': 'nv-tablewrap' });
+		var devBox = E('div', { 'class': 'nv-tablewrap' });
+
+		var legend = E('div', { 'class': 'nv-legend' });
+		legend.innerHTML =
+			'<span class="nv-lg"><i class="nv-dn"></i>下载</span>' +
+			'<span class="nv-lg"><i class="nv-up"></i>上传</span>';
 
 		var root = E('div', { 'class': 'nv-root' }, [
 			E('style', {}, CSS),
 			E('div', { 'class': 'nv-head' }, [
 				E('h2', {}, '实时流量'),
 				E('span', { 'class': 'nv-sub' }, [
-					E('span', { 'class': 'nv-dot' }),
+					E('span', { 'class': 'nv-live' }),
 					'每 ' + POLL_INTERVAL + ' 秒刷新 · 曲线保留最近 ' +
-						(MAXPOINTS * POLL_INTERVAL) + ' 秒'
+						(MAXPOINTS * POLL_INTERVAL / 60) + ' 分钟'
 				])
 			]),
-			ifBox,
-			E('h3', { 'class': 'nv-h3' }, '设备排行'),
-			devBox
+			E('div', { 'class': 'nv-hero' }, [
+				E('div', { 'class': 'nv-card nv-chartcard' }, [
+					E('div', { 'class': 'nv-chart-hd' }, [
+						E('span', { 'class': 'nv-chart-title' }, '流量统计'),
+						legend,
+						nowBox
+					]),
+					chartBox
+				]),
+				sideBox
+			]),
+			E('div', { 'class': 'nv-sec' }, [
+				E('div', { 'class': 'nv-sec-hd' }, [
+					E('h3', {}, '网络接口'),
+					E('span', {}, '速率取自 /proc/net/dev 差分，累计值为接口开机以来的计数')
+				]),
+				ifBox
+			]),
+			E('div', { 'class': 'nv-sec' }, [
+				E('div', { 'class': 'nv-sec-hd' }, [
+					E('h3', {}, '设备流量排行'),
+					E('span', {}, '按当前存活连接的累计字节排序，最多 ' + MAX_DEVICES + ' 条')
+				]),
+				devBox
+			])
 		]);
 
 		function refresh() {
@@ -317,7 +715,33 @@ return view.extend({
 				callInterfaces().catch(function() { return null; }),
 				callDevices().catch(function() { return null; })
 			]).then(function(res) {
-				renderInterfaces(ifBox, res[0]);
+				var d = res[0];
+
+				if (d && d.interfaces) {
+					d.interfaces.forEach(function(it) {
+						var h = ifHist[it.name] || (ifHist[it.name] = []);
+						h.push({ d: Number(it.rx_rate) || 0, u: Number(it.tx_rate) || 0 });
+						while (h.length > MAXPOINTS) h.shift();
+					});
+
+					var agg = aggregate(d.interfaces);
+					heroHist.push({ d: agg.d, u: agg.u });
+					while (heroHist.length > MAXPOINTS) heroHist.shift();
+
+					chartBox.innerHTML = chartSvg(heroHist);
+					nowBox.innerHTML =
+						'<span>上传<b>' + fmtRate(agg.u) + '</b></span>' +
+						'<span>下载<b>' + fmtRate(agg.d) + '</b></span>';
+					sideBox.innerHTML = sideHtml(d);
+					ifBox.innerHTML = ifTableHtml(d);
+				}
+				else {
+					chartBox.innerHTML =
+						'<div class="nv-chart-empty">无法从路由器读取接口数据</div>';
+					sideBox.innerHTML = '';
+					ifBox.innerHTML = '<div class="nv-empty">无法从路由器读取接口数据</div>';
+				}
+
 				renderDevices(devBox, res[1]);
 			});
 		}
