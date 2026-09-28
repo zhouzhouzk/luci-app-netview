@@ -49,15 +49,31 @@ l3_device() {
 	printf '%s' "$dev"
 }
 
-# Negotiated link speed in Mbit/s; 0 when unknown (wireless, tunnels, ...).
-# Bridges have no speed of their own, so fall back to a member port.
+# Physical NIC or pure software interface? A real NIC carries a symlink at
+# /sys/class/net/<dev>/device pointing at its bus device; ppp, tun, wireguard
+# and bridges have no such node.
+if_kind() {
+	[ -e "/sys/class/net/$1/device" ] && { printf 'physical'; return; }
+	printf 'virtual'
+}
+
+# Negotiated link speed in Mbit/s; 0 when there is no meaningful link rate.
+#
+# Only physical NICs are asked directly. Software interfaces get no vote: a
+# tun / wireguard device has no phy to negotiate with, and several kernels
+# answer /sys/class/net/<dev>/speed with the ethtool default (1000) instead of
+# an error -- reading it blindly made OpenClash's utun claim a gigabit link.
+# A bridge is the one virtual device with a real answer, and that answer
+# belongs to a member port, so bridges fall back to brif/ below.
 if_speed() {
 	local dev="$1" s m
-	s=$(cat "/sys/class/net/$dev/speed" 2>/dev/null)
-	case "$s" in
-		''|*[!0-9]*) ;;
-		*) [ "$s" -gt 0 ] && { printf '%s' "$s"; return; } ;;
-	esac
+	if [ -e "/sys/class/net/$dev/device" ]; then
+		s=$(cat "/sys/class/net/$dev/speed" 2>/dev/null)
+		case "$s" in
+			''|*[!0-9]*) ;;
+			*) [ "$s" -gt 0 ] && { printf '%s' "$s"; return; } ;;
+		esac
+	fi
 	for m in /sys/class/net/"$dev"/brif/*; do
 		[ -e "$m" ] || continue
 		s=$(cat "$m/speed" 2>/dev/null)
@@ -73,6 +89,40 @@ if_operstate() {
 	local s
 	s=$(cat "/sys/class/net/$1/operstate" 2>/dev/null)
 	printf '%s' "${s:-unknown}"
+}
+
+# Is the link usable right now?
+#
+# operstate alone is not enough. The kernel only drives operstate to "up" for
+# drivers that report carrier the ethernet way; point-to-point devices -- PPP
+# (pppoe-wan), tun (OpenClash's utun), wireguard (AmneziaWG) -- stay at
+# "unknown" for their whole life. Judging by operstate alone therefore painted
+# every one of them as "not connected" even while they were carrying traffic.
+#
+# So look at the IFF_* flags ip reports instead:
+#   UP        interface has been brought up (ip link set up)
+#   LOWER_UP  the driver considers the link viable (== IFF_RUNNING)
+# Both set means up. UP without LOWER_UP means the device is enabled but no
+# link has come up yet (cable out, peer not negotiating); tunnels do not always
+# raise LOWER_UP, so fall back to "does it hold a global address" -- an address
+# is only assigned once the interface is actually working.
+if_link() {
+	local dev="$1" f
+	f=$(ip -o link show dev "$dev" 2>/dev/null \
+		| awk 'NR == 1 && match($0, /<[^>]*>/) {
+			print substr($0, RSTART + 1, RLENGTH - 2)
+		}')
+	case ",$f," in
+		*,UP,*) ;;
+		*) printf 'down'; return ;;
+	esac
+	case ",$f," in
+		*,LOWER_UP,*) printf 'up'; return ;;
+	esac
+	ip -o addr show dev "$dev" scope global 2>/dev/null | grep -q . && {
+		printf 'up'; return
+	}
+	printf 'down'
 }
 
 # "192.168.9.231/24" for the first global address of a device, empty if none.
@@ -215,6 +265,8 @@ do_interfaces() {
 		json_add_string "role"  "$(if_role "$name" "$wan" "$lan")"
 		json_add_string "roles" "$(if_roles "$name" "$wan" "$wan6" "$lan")"
 		json_add_string "state" "$(if_operstate "$name")"
+		json_add_string "link"  "$(if_link "$name")"
+		json_add_string "kind"  "$(if_kind "$name")"
 		json_add_int    "speed" "$(if_speed "$name")"
 		json_add_int    "rx" "$rx"
 		json_add_int    "tx" "$tx"

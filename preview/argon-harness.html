@@ -170,7 +170,7 @@ var CSS = [
 	'           background: var(--nv-ok); margin-right: 5px; vertical-align: 1px; }',
 
 	'.nv-hero { display: grid; gap: 16px; align-items: start;',
-	'           grid-template-columns: minmax(0, 1fr) 344px; }',
+	'           grid-template-columns: minmax(0, 1fr) 364px; }',
 	'@media (max-width: 1000px) { .nv-hero { grid-template-columns: minmax(0, 1fr); } }',
 
 	'.nv-chartcard { padding: 16px 18px 10px; }',
@@ -357,7 +357,29 @@ function esc(s) {
 		.replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function truthy(v) { return v === true || v === 1 || v === '1' || v === 'true'; }
+function truthy(v) {
+	return v === true || v === 1 || v === '1' || v === 'true';
+}
+
+/* 链路是否可用。
+ *
+ * 不能拿 operstate 当唯一判据：内核只对以太网这类按常规上报载波的驱动把
+ * operstate 推到 up，pppoe-wan（PPP）、utun（OpenClash 的 tun）、
+ * AmneziaWG（wireguard）这些点对点设备一辈子停在 unknown —— 早先这么判，
+ * 它们全被写成"未连接"，哪怕正在跑流量。后端因此把 operstate、IFF_UP /
+ * LOWER_UP 标志和"有没有拿到全局地址"合起来算出一个 link 字段。
+ * 老版本后端不带 link，这时才退回 operstate。 */
+function linkUp(it) {
+	if (it && it.link) return it.link === 'up';
+	return !!it && it.state === 'up';
+}
+
+/* 协商速率。后端只把物理网卡（以及桥的成员口）报上来，PPP / tun /
+ * wireguard 这类软件接口一律给 0 —— 它们没有可协商的链路，个别内核还会
+ * 拿 ethtool 的默认值 1000 顶上来，显示出来是误导。 */
+function speedOf(it) {
+	return Number(it && it.speed) || 0;
+}
 
 /* ---------------------------------------------------------- path building --- */
 
@@ -515,22 +537,28 @@ function sideHtml(d) {
 	html += '<div class="nv-card nv-info"><div class="nv-info-hd">IP 地址（' +
 		esc(d.wan || 'wan') + '）</div>' + rows + '</div>';
 
+	/* 纯软件接口（PPP / tun / wireguard）没有协商速率可显示，早先只印一个
+	 * "—"，看着就像"这个口没状态"。改成：有速率的报速率，没速率的报链路
+	 * 状态词，两者的前面都带一个状态点。 */
 	var order = { 'WAN': 0, 'LAN': 1 };
 	var links = (d.interfaces || []).filter(function(it) {
-		return it.role || Number(it.speed) > 0;
+		return it.role || speedOf(it) > 0 || linkUp(it);
 	}).sort(function(a, b) {
 		var oa = order[a.role] != null ? order[a.role] : 2;
 		var ob = order[b.role] != null ? order[b.role] : 2;
 		if (oa !== ob) return oa - ob;
 		return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
-	}).slice(0, 6);
+	}).slice(0, 8);
 
 	if (links.length) {
 		var tiles = links.map(function(it) {
 			var roles = it.roles || it.role || '';
+			var spd = speedOf(it);
+			var up = linkUp(it);
 			return '<div class="nv-tile"><span class="nv-tile-ico">' + ICON.nic + '</span>' +
 				'<div style="min-width:0">' +
-					'<div class="nv-tile-t">' + fmtSpeed(it.speed) + '</div>' +
+					'<div class="nv-tile-t"><span class="nv-dot' + (up ? ' up' : '') + '"></span>' +
+						(spd > 0 ? fmtSpeed(spd) : (up ? '已连接' : '未连接')) + '</div>' +
 					'<div class="nv-tile-s" title="' + esc(it.name + (roles ? '（' + roles + '）' : '')) + '">' +
 						esc(it.name) + (roles ? '（' + esc(roles) + '）' : '') + '</div>' +
 				'</div></div>';
@@ -566,12 +594,16 @@ function ifTableHtml(d) {
 
 	list.forEach(function(it) {
 		var h = ifHist[it.name] || [];
-		var up = it.state === 'up';
+		var up = linkUp(it);
+		var spd = speedOf(it);
+
 		html += '<tr>' +
 			'<td><span class="nv-ifname">' + esc(it.name) + '</span>' + roleBadge(it) + '</td>' +
-			'<td class="nv-muted"><span class="nv-dot' + (up ? ' up' : '') + '"></span>' +
+			'<td class="nv-muted">' +
+				'<span class="nv-dot' + (up ? ' up' : '') + '"></span>' +
 				(up ? '运行中' : '未连接') +
-				(Number(it.speed) > 0 ? ' · ' + Number(it.speed) + 'M' : '') + '</td>' +
+				(spd > 0 ? ' · ' + spd + 'M' : '') +
+			'</td>' +
 			'<td class="nv-num nv-dn nv-r">' + fmtRate(it.rx_rate) + '</td>' +
 			'<td class="nv-num nv-up nv-r">' + fmtRate(it.tx_rate) + '</td>' +
 			'<td>' + sparkSvg(h) + '</td>' +
@@ -652,16 +684,25 @@ var el = {
 	devtab:document.getElementById('devtab')
 };
 
-/* 每个接口在预览里的模拟状态 */
+/* 每个接口在预览里的模拟状态。
+ *
+ * 故意按真实家庭宽带的样子摆：WAN 是 PPPoE 拨号出来的 pppoe-wan（虚拟口，
+ * operstate 永远是 unknown），跑在物理口 eth0 上；另外挂一个 wireguard
+ * VPN 口。这三种接口在 /sys/class/net 下都没有 speed 节点 —— 早先的版本
+ * 会把它们全标成"未连接"、并在状态格里印一个"—"，这正是本页要盯住的
+ * 回归点。 */
 var IFACES = [
-	{ name: 'eth0', role: 'WAN', roles: 'WAN,WAN6', state: 'up', speed: 10000, dev: 'WAN 出口' },
-	{ name: 'br-lan', role: 'LAN', roles: 'LAN', state: 'up', speed: 10000, dev: '局域网桥' },
-	{ name: 'eth1', role: '', roles: '', state: 'up', speed: 1000, dev: null },
-	{ name: 'docker0', role: '', roles: '', state: 'down', speed: 0, dev: null }
+	{ name: 'pppoe-wan', role: 'WAN', roles: 'WAN', state: 'unknown', link: 'up',   kind: 'virtual',  speed: 0,     dev: null },
+	{ name: 'eth0',      role: '',    roles: '',    state: 'up',      link: 'up',   kind: 'physical', speed: 10000, dev: null },
+	{ name: 'br-lan',    role: 'LAN', roles: 'LAN', state: 'up',      link: 'up',   kind: 'virtual',  speed: 10000, dev: '局域网桥' },
+	{ name: 'eth1',      role: '',    roles: '',    state: 'up',      link: 'up',   kind: 'physical', speed: 1000,  dev: null },
+	{ name: 'awg0',      role: '',    roles: '',    state: 'unknown', link: 'up',   kind: 'virtual',  speed: 0,     dev: null },
+	{ name: 'docker0',   role: '',    roles: '',    state: 'down',    link: 'down', kind: 'virtual',  speed: 0,     dev: null }
 ];
 
-var total = { eth0: [ 48234496000, 5199257600 ], 'br-lan': [ 3187671040, 2684354560 ],
-              eth1: [ 0, 0 ], docker0: [ 184320, 40960 ] };
+var total = { 'pppoe-wan': [ 48234496000, 5199257600 ], eth0: [ 49152344064, 5459257600 ],
+              'br-lan': [ 3187671040, 2684354560 ], eth1: [ 0, 0 ],
+              awg0: [ 0, 0 ], docker0: [ 184320, 40960 ] };
 
 /* 平滑的多峰包络：三条不同周期的正弦叠加，值域固定在 0.30 ~ 1.00。
  * 早期版本用 max(0, sin) 做包络，后半段会整段贴底，看着像曲线断了。 */
@@ -678,17 +719,26 @@ function sampleIfaces() {
 	var out = [];
 	IFACES.forEach(function(f) {
 		var dr, ur;
-		if (f.name === 'eth0') {
+		if (f.name === 'pppoe-wan') {
 			/* 上传约为下行的 1/3 —— 家庭宽带的典型形态，也让紫色带宽
 			 * 有足够高度可读（对齐 iStoreOS 那张图的观感） */
 			dr = 1.70e6 * envelope(tick, 0.0);
 			ur = 6.20e5 * envelope(tick, 2.4);
+		} else if (f.name === 'eth0') {
+			/* 物理承载口：比 pppoe-wan 略高一点，因为拨号封装本身也有开销，
+			 * 看着更像真实抓包 */
+			dr = 1.79e6 * envelope(tick, 0.0);
+			ur = 6.55e5 * envelope(tick, 2.4);
 		} else if (f.name === 'br-lan') {
 			dr = 8.50e5 * envelope(tick, 1.2);
 			ur = 3.00e5 * envelope(tick, 3.6);
 		} else if (f.name === 'eth1') {
 			dr = 6.00e4 * envelope(tick, 4.1);
 			ur = 1.50e4 * envelope(tick, 5.3);
+		} else if (f.name === 'awg0') {
+			/* VPN 口：量小但在跑 —— 用来盯住"虚拟口也不该被判成未连接" */
+			dr = 4.20e4 * envelope(tick, 3.0);
+			ur = 1.10e4 * envelope(tick, 4.7);
 		} else {
 			dr = 0; ur = 0;
 		}
@@ -703,7 +753,8 @@ function sampleIfaces() {
 		}
 
 		out.push({
-			name: f.name, role: f.role, roles: f.roles, state: f.state, speed: f.speed,
+			name: f.name, role: f.role, roles: f.roles, state: f.state,
+			link: f.link, kind: f.kind, speed: f.speed,
 			rx: Math.round(total[f.name][0]), tx: Math.round(total[f.name][1]),
 			rx_rate: dr, tx_rate: ur
 		});
@@ -742,9 +793,9 @@ function sampleDevices() {
 }
 
 var WAN_INFO = {
-	connected: true, uptime: 411567, proto: 'dhcp', device: 'eth0',
-	ipv4: '192.168.9.231', mask: 24, ipv6: '2408:8207:8c1f:2a00::1',
-	gateway: '192.168.9.1', dns: '192.168.9.1 223.5.5.5', dns_auto: true
+	connected: true, uptime: 411567, proto: 'pppoe', device: 'pppoe-wan',
+	ipv4: '100.64.128.37', mask: 32, ipv6: '2408:8207:8c1f:2a00::1',
+	gateway: '100.64.0.1', dns: '192.168.9.1 223.5.5.5', dns_auto: true
 };
 
 function refresh() {
@@ -764,7 +815,7 @@ function refresh() {
 	el.now.innerHTML = '<span>上传<b>' + fmtRate(agg.u) + '</b></span>' +
 	                   '<span>下载<b>' + fmtRate(agg.d) + '</b></span>';
 	el.side.innerHTML = sideHtml({
-		wan: 'eth0', lan: 'br-lan', clients: 12,
+		wan: 'pppoe-wan', lan: 'br-lan', clients: 12,
 		wan_info: WAN_INFO, interfaces: ifaces
 	});
 	el.iftab.innerHTML = ifTableHtml({ interfaces: ifaces });

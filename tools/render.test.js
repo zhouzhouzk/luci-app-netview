@@ -38,20 +38,32 @@ function dirty(html) {
 
 /* ------------------------------------------------------------------ mocks --- */
 
+/* 按真实家庭宽带摆：WAN 是 PPPoE 拨号出来的 pppoe-wan（虚拟口，operstate
+ * 永远是 unknown），跑在物理口 eth0 上；另有一个已断开的 wireguard 口。
+ * link 是后端综合 operstate / IFF_UP / LOWER_UP / 全局地址算出来的结论。 */
 const IF_FULL = {
-	timestamp: 1758000000, wan: 'eth0', lan: 'br-lan', clients: 12,
+	timestamp: 1758000000, wan: 'pppoe-wan', lan: 'br-lan', clients: 12,
 	wan_info: {
-		connected: true, uptime: 411567, proto: 'dhcp', device: 'eth0',
+		connected: true, uptime: 411567, proto: 'pppoe', device: 'pppoe-wan',
 		ipv4: '192.168.9.231', mask: 24, ipv6: '2408:8207:1234:5678::1',
 		gateway: '192.168.9.1', dns: '192.168.9.1 223.5.5.5', dns_auto: true
 	},
 	interfaces: [
-		{ name: 'eth0',    role: 'WAN', roles: 'WAN,WAN6', state: 'up',   speed: 10000,
+		{ name: 'pppoe-wan', role: 'WAN', roles: 'WAN', state: 'unknown', link: 'up',
+		  kind: 'virtual',  speed: 0,
 		  rx: 12345678901, tx: 987654321, rx_rate: 5242880, tx_rate: 314572 },
-		{ name: 'br-lan',  role: 'LAN', roles: 'LAN',      state: 'up',   speed: 10000,
+		{ name: 'eth0',      role: '',    roles: '',    state: 'up',      link: 'up',
+		  kind: 'physical', speed: 10000,
+		  rx: 12400000000, tx: 1012345678, rx_rate: 5400000, tx_rate: 330000 },
+		{ name: 'br-lan',    role: 'LAN', roles: 'LAN', state: 'up',      link: 'up',
+		  kind: 'virtual',  speed: 10000,
 		  rx: 555555555,   tx: 666666666, rx_rate: 1048576, tx_rate: 262144 },
-		{ name: 'docker0', role: '',    roles: '',         state: 'down', speed: 0,
-		  rx: 1000,        tx: 2000,     rx_rate: 0,       tx_rate: 0 }
+		{ name: 'awg0',      role: '',    roles: '',    state: 'unknown', link: 'down',
+		  kind: 'virtual',  speed: 0,
+		  rx: 4096,        tx: 2048,      rx_rate: 0,       tx_rate: 0 },
+		{ name: 'docker0',   role: '',    roles: '',    state: 'down',    link: 'down',
+		  kind: 'virtual',  speed: 0,
+		  rx: 1000,        tx: 2000,      rx_rate: 0,       tx_rate: 0 }
 	]
 };
 
@@ -60,7 +72,8 @@ const IF_NO_WAN = {
 	wan_info: { connected: false, uptime: 0, proto: '', device: '', ipv4: '', mask: 0,
 	            ipv6: '', gateway: '', dns: '', dns_auto: false },
 	interfaces: [
-		{ name: 'br-lan', role: 'LAN', roles: 'LAN', state: 'up', speed: 1000,
+		{ name: 'br-lan', role: 'LAN', roles: 'LAN', state: 'up', link: 'up',
+		  kind: 'virtual', speed: 1000,
 		  rx: 10, tx: 20, rx_rate: 0, tx_rate: 0 }
 	]
 };
@@ -79,13 +92,24 @@ let html = API.sideHtml(IF_FULL);
 check('含连通状态', html.includes('已连接互联网'));
 check('含连接时长', html.includes('4 天'), /4 天/.test(html) ? '' : html.slice(0, 200));
 check('含设备数', html.includes('>12<'));
-check('含 WAN 设备名', html.includes('IP 地址（eth0）'));
-check('含 IPv4 + DHCP 标注', html.includes('192.168.9.231') && html.includes('DHCP'));
+check('含 WAN 设备名', html.includes('IP 地址（pppoe-wan）'));
+check('含 IPv4 + PPPoE 标注', html.includes('192.168.9.231') && html.includes('PPPoE'));
 check('含 IPv6', html.includes('2408:8207'));
 check('含 DNS + 自动获取', html.includes('223.5.5.5') && html.includes('自动获取'));
 check('含网卡瓦片 10000 Mbit/s', html.includes('10000 Mbit/s'));
-check('瓦片带角色标注', html.includes('（WAN,WAN6）'));
+check('瓦片带角色标注', html.includes('（WAN）'));
 check('无 NaN/undefined 泄漏', dirty(html) === null, dirty(html));
+
+/* pppoe-wan 是虚拟口：operstate 是 unknown、没有协商速率。旧版把它画成
+ * "—"，看着像这个口没状态；现在应当报"已连接"，而且不能拿 eth0 的速率
+ * 冒充。 */
+(function () {
+	var i = html.indexOf('pppoe-wan（WAN）');
+	check('瓦片里找得到 pppoe-wan', i > 0);
+	var tile = html.slice(Math.max(0, i - 220), i + 20);
+	check('虚拟口画成"已连接"而不是"—"', tile.includes('已连接'), tile);
+	check('虚拟口不冒充协商速率', !tile.includes('Mbit/s'), tile);
+})();
 
 html = API.sideHtml(IF_NO_WAN);
 check('无 WAN 时不抛错且提示未连接', html.includes('未连接互联网'));
@@ -108,12 +132,39 @@ check('connected=false 视为未连接', !API.sideHtml({
 
 console.log('\n=== interface table ===');
 html = API.ifTableHtml(IF_FULL);
-check('WAN 排在 LAN 前', html.indexOf('eth0') < html.indexOf('br-lan'));
+check('WAN 排在 LAN 前', html.indexOf('pppoe-wan') < html.indexOf('br-lan'));
 check('含 WAN 徽章', html.includes('>WAN</span>'));
 check('含速率', html.includes('MB/s') || html.includes('KB/s'));
 check('含 sparkline', html.includes('<svg'));
 check('docker0 也列出', html.includes('docker0'));
 check('无 NaN/undefined 泄漏', dirty(html) === null, dirty(html));
+
+/* 状态列。以前只看 operstate，而 PPP / tun / wireguard 的 operstate 永远是
+ * unknown —— 于是"未连接"和"正在跑流量"挂在同一行上，这正是用户报的问题。
+ * 现在按后端算好的 link 判，operstate 只作为老后端的兜底。 */
+(function () {
+	function rowOf(src, name) {
+		var i = src.indexOf('<span class="nv-ifname">' + name + '</span>');
+		if (i < 0) return '';
+		var j = src.indexOf('</tr>', i);
+		return src.slice(i, j < 0 ? undefined : j);
+	}
+
+	check('pppoe-wan 判运行中（operstate=unknown 但 link=up）',
+		rowOf(html, 'pppoe-wan').includes('运行中'), rowOf(html, 'pppoe-wan'));
+	check('pppoe-wan 不打印协商速率', !rowOf(html, 'pppoe-wan').includes('M</td>'));
+	check('eth0 判运行中并带速率', rowOf(html, 'eth0').includes('运行中 · 10000M'));
+	check('awg0 判未连接', rowOf(html, 'awg0').includes('未连接'));
+
+	/* 1.1.2 及之前没有 link 字段，此时必须退回 operstate，不能全判未连接 */
+	const legacy = { interfaces: [
+		{ name: 'pppoe-wan', role: 'WAN', state: 'unknown', speed: 0, rx: 1, tx: 2, rx_rate: 0, tx_rate: 0 },
+		{ name: 'eth0',      role: '',    state: 'up',      speed: 1000, rx: 1, tx: 2, rx_rate: 0, tx_rate: 0 }
+	] };
+	const lh = API.ifTableHtml(legacy);
+	check('老后端：state=up 仍判运行中', rowOf(lh, 'eth0').includes('运行中'));
+	check('老后端：state=unknown 判未连接', rowOf(lh, 'pppoe-wan').includes('未连接'));
+})();
 
 check('空接口列表走空态', API.ifTableHtml({ interfaces: [] }).includes('未检测到网络接口'));
 check('interfaces 缺失不抛错', API.ifTableHtml({}).includes('未检测到网络接口'));

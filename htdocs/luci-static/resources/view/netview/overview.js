@@ -135,7 +135,7 @@ var CSS = [
 
 	/* ---- hero grid ---- */
 	'.nv-hero { display: grid; gap: 16px; align-items: start;',
-	'           grid-template-columns: minmax(0, 1fr) 344px; }',
+	'           grid-template-columns: minmax(0, 1fr) 364px; }',
 	'@media (max-width: 1000px) { .nv-hero { grid-template-columns: minmax(0, 1fr); } }',
 
 	/* ---- hero chart ---- */
@@ -341,6 +341,26 @@ function truthy(v) {
 	return v === true || v === 1 || v === '1' || v === 'true';
 }
 
+/* 链路是否可用。
+ *
+ * 不能拿 operstate 当唯一判据：内核只对以太网这类按常规上报载波的驱动把
+ * operstate 推到 up，pppoe-wan（PPP）、utun（OpenClash 的 tun）、
+ * AmneziaWG（wireguard）这些点对点设备一辈子停在 unknown —— 早先这么判，
+ * 它们全被写成"未连接"，哪怕正在跑流量。后端因此把 operstate、IFF_UP /
+ * LOWER_UP 标志和"有没有拿到全局地址"合起来算出一个 link 字段。
+ * 老版本后端不带 link，这时才退回 operstate。 */
+function linkUp(it) {
+	if (it && it.link) return it.link === 'up';
+	return !!it && it.state === 'up';
+}
+
+/* 协商速率。后端只把物理网卡（以及桥的成员口）报上来，PPP / tun /
+ * wireguard 这类软件接口一律给 0 —— 它们没有可协商的链路，个别内核还会
+ * 拿 ethtool 的默认值 1000 顶上来，显示出来是误导。 */
+function speedOf(it) {
+	return Number(it && it.speed) || 0;
+}
+
 /* ---------------------------------------------------------- path building --- */
 
 /* Catmull-Rom -> cubic Bezier. The 0.18 tension is low enough that the curve
@@ -537,24 +557,33 @@ function sideHtml(d) {
 		'<div class="nv-info-hd">IP 地址（' + esc(d.wan || 'wan') + '）</div>' + rows +
 	'</div>';
 
-	/* ---- interface tiles: physical-ish links, WAN first ---- */
+	/* ---- interface tiles: WAN first, then LAN, then everything else ----
+	 * 纯软件接口（PPP / tun / wireguard）没有协商速率可显示，早先只印一个
+	 * "—"，看着就像"这个口没状态"。改成：有速率的报速率，没速率的报链路
+	 * 状态词，两者的前面都带一个状态点。 */
 	var order = { 'WAN': 0, 'LAN': 1 };
 	var links = (d.interfaces || []).filter(function(it) {
-		return it.role || Number(it.speed) > 0;
+		return it.role || speedOf(it) > 0 || linkUp(it);
 	}).sort(function(a, b) {
 		var oa = order[a.role] != null ? order[a.role] : 2;
 		var ob = order[b.role] != null ? order[b.role] : 2;
 		if (oa !== ob) return oa - ob;
 		return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
-	}).slice(0, 6);
+	}).slice(0, 8);
 
 	if (links.length) {
 		var tiles = links.map(function(it) {
 			var roles = it.roles || it.role || '';
+			var spd = speedOf(it);
+			var up = linkUp(it);
+
 			return '<div class="nv-tile">' +
 				'<span class="nv-tile-ico">' + ICON.nic + '</span>' +
 				'<div style="min-width:0">' +
-					'<div class="nv-tile-t">' + fmtSpeed(it.speed) + '</div>' +
+					'<div class="nv-tile-t">' +
+						'<span class="nv-dot' + (up ? ' up' : '') + '"></span>' +
+						(spd > 0 ? fmtSpeed(spd) : (up ? '已连接' : '未连接')) +
+					'</div>' +
 					'<div class="nv-tile-s" title="' + esc(it.name + (roles ? '（' + roles + '）' : '')) + '">' +
 						esc(it.name) + (roles ? '（' + esc(roles) + '）' : '') + '</div>' +
 				'</div>' +
@@ -594,14 +623,15 @@ function ifTableHtml(d) {
 
 	list.forEach(function(it) {
 		var h = ifHist[it.name] || [];
-		var up = it.state === 'up';
+		var up = linkUp(it);
+		var spd = speedOf(it);
 
 		html += '<tr>' +
 			'<td><span class="nv-ifname">' + esc(it.name) + '</span>' + roleBadge(it) + '</td>' +
 			'<td class="nv-muted">' +
 				'<span class="nv-dot' + (up ? ' up' : '') + '"></span>' +
 				(up ? '运行中' : '未连接') +
-				(Number(it.speed) > 0 ? ' · ' + Number(it.speed) + 'M' : '') +
+				(spd > 0 ? ' · ' + spd + 'M' : '') +
 			'</td>' +
 			'<td class="nv-num nv-dn nv-r">' + fmtRate(it.rx_rate) + '</td>' +
 			'<td class="nv-num nv-up nv-r">' + fmtRate(it.tx_rate) + '</td>' +

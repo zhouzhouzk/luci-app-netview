@@ -34,7 +34,7 @@ ImmortalWrt / OpenWrt 的实时网络流量查看器（LuCI 插件）。
 | 连接状态      | 互联网是否连通、已连接时长                                         | `ifstatus wan`                  |
 | 已连接设备     | 在线设备数量                                                | `/proc/net/arp`                 |
 | IP 地址     | WAN 的 IPv4 / IPv6 / DNS，标注协议（DHCP / PPPoE / 静态）与 DNS 是否自动获取 | `ip addr`、`resolv.conf.auto`     |
-| 网络接口状态    | 各网卡的协商速率（Mbit/s）与它承载的逻辑接口                             | `/sys/class/net/*/speed`        |
+| 网络接口状态    | 各网卡的协商速率（Mbit/s）与它承载的逻辑接口；软件接口没有速率，改报链路状态            | `/sys/class/net/*/speed`        |
 | 网络接口      | 每个接口的实时速率、最近 3 分钟曲线、累计收发                              | `/proc/net/dev`                 |
 | 设备流量排行    | 局域网每台设备的实时速率、累计流量、连接数                                 | `/proc/net/nf_conntrack`        |
 
@@ -176,19 +176,19 @@ luci-app-netview/
 ### 方式 A：直接下载 ipk（推荐）
 
 从 [Releases](https://github.com/zhouzhouzk/luci-app-netview/releases/latest) 下载
-`luci-app-netview_1.1.2-r1_all.ipk`，传到路由器安装：
+`luci-app-netview_1.1.3-r1_all.ipk`，传到路由器安装：
 
 ```sh
-scp luci-app-netview_1.1.2-r1_all.ipk root@192.168.1.1:/tmp/
-ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.1.2-r1_all.ipk'
+scp luci-app-netview_1.1.3-r1_all.ipk root@192.168.1.1:/tmp/
+ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.1.3-r1_all.ipk'
 ```
 
 也可以让路由器自己下载（省掉中转）：
 
 ```sh
 cd /tmp
-wget https://github.com/zhouzhouzk/luci-app-netview/releases/download/v1.1.2/luci-app-netview_1.1.2-r1_all.ipk
-opkg install luci-app-netview_1.1.2-r1_all.ipk
+wget https://github.com/zhouzhouzk/luci-app-netview/releases/download/v1.1.3/luci-app-netview_1.1.3-r1_all.ipk
+opkg install luci-app-netview_1.1.3-r1_all.ipk
 ```
 
 卸载：`opkg remove luci-app-netview`。
@@ -207,10 +207,10 @@ opkg install luci-app-netview_1.1.2-r1_all.ipk
 需要 Python 3，不需要 OpenWrt SDK：
 
 ```sh
-python build-ipk.py                    # 产物: dist/luci-app-netview_1.1.2-r1_all.ipk
+python build-ipk.py                    # 产物: dist/luci-app-netview_1.1.3-r1_all.ipk
 
-scp dist/luci-app-netview_1.1.2-r1_all.ipk root@192.168.1.1:/tmp/
-ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.1.2-r1_all.ipk'
+scp dist/luci-app-netview_1.1.3-r1_all.ipk root@192.168.1.1:/tmp/
+ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.1.3-r1_all.ipk'
 ```
 
 ### 方式 C：免编译一键部署
@@ -229,7 +229,7 @@ cd luci-app-netview
 ```sh
 cp -r luci-app-netview package/
 make package/luci-app-netview/compile V=s
-# 产物: bin/packages/*/base/luci-app-netview_1.1.2-r1_all.ipk
+# 产物: bin/packages/*/base/luci-app-netview_1.1.3-r1_all.ipk
 ```
 
 装完打开 `http://192.168.1.1/cgi-bin/luci/admin/status/netview`，菜单位置：**状态 → 网络流量**。
@@ -255,9 +255,22 @@ python build-ipk.py --list               # 只看载荷清单，不生成文件
 下次调用时用 `(bytes_now - bytes_prev) / (t_now - t_prev)` 求速率。因此**第一次调用会返回 0**，
 第二次（约 3 秒后）起才有真实数值。
 
-**接口元信息**：协商速率读 `/sys/class/net/<dev>/speed`。网桥（`br-lan`）自己没有这个文件，
-脚本会回落到 `/sys/class/net/br-lan/brif/` 下的成员端口，取最快的一个；无线和隧道返回空或
-`-1`，统一归一成 0（前端显示 `—`）。链路状态取 `operstate`。
+**接口元信息**：协商速率只问物理网卡 —— 判据是 `/sys/class/net/<dev>/device` 这个指向总线
+设备的符号链接，`ppp` / `tun` / `wireguard` / 网桥都没有它。软件接口一律不给速率：`tun`
+本来就没有可协商的对端，而**部分内核对没有 phy 的设备会用 ethtool 的默认值 `1000` 顶上来**
+（而不是报错），照读就会让 OpenClash 的 `utun` 冒充千兆链路。网桥是唯一例外，它的速率
+来自成员口：回落到 `/sys/class/net/<dev>/brif/`，取最快的一个。
+
+**链路状态**：不能只看 `operstate`。内核只对以太网那样按常规上报载波的驱动把 `operstate`
+推到 `up`，而 PPP（`pppoe-wan`）、tun（`utun`）、wireguard（`AmneziaWG`）这些点对点设备
+**一辈子停在 `unknown`** —— 只看它就会把这些正在跑流量的接口全标成"未连接"。所以改成看
+`ip -o link show` 报的 `IFF_*` 标志：`UP` 表示设备已启用，`LOWER_UP`（即 `IFF_RUNNING`）
+表示驱动认为链路可用，两者都有就是 up；只有 `UP` 说明设备开着但链路还没起来，这时再退一步
+问"有没有拿到全局地址"—— 隧道不一定会抬 `LOWER_UP`，而地址只有接口真正通了才会分配。
+
+后端把结论作为 `link` 字段下发，原始的 `operstate` 仍旧保留在 `state` 里；前端优先用
+`link`，没有这个字段（1.1.2 及更早的后端）时才退回 `state`，所以前后端版本错配也不会全判
+成未连接。
 
 **WAN 面貌**：`ifstatus wan` 取 `up` / `uptime` / `proto`，但地址**不走 JSON 解析**，而是直接问
 `ip -4/-6 addr show ... scope global`，DNS 读 netifd 写下的
@@ -367,10 +380,13 @@ node tools/argon-harness.js   # 另：重新生成 preview/argon-harness.html
   标题重置的几条规则还在。这三类问题在纯预览页里都看不出来，只有装到路由器上才暴露，
   所以必须靠算出来的断言拦住
 - `parity.test.js` 剥掉预览页独有的 `.nv-force-dark` 覆盖块后，要求两边 CSS 完全一致，
-  并用同一份输入比对 `sideHtml` / `ifTableHtml` / `chartSvg` / 格式化函数的输出
+  并用同一份输入比对 `sideHtml` / `ifTableHtml` / `chartSvg` / 格式化函数的输出。
+  它还盯着 `argon-harness.html` —— 静态骨架和渲染层脚本都要与预览页一致，
+  否则"改了预览页忘了重新生成"会让测试页停在旧界面上，而它恰恰是用来判断真机效果的
 - `backend.test.sh` 把脚本里硬编码的 `/sys/class/net` 重定向到临时假目录，
-  真实执行 `if_speed` / `if_roles` / `addr_of`，覆盖网桥成员口回退、无线空值、
-  隧道 `-1`、`wan` 与 `wan6` 落在同一物理口等边界
+  真实执行 `if_speed` / `if_kind` / `if_link` / `if_roles` / `addr_of`，覆盖网桥成员口回退、
+  无线空值、隧道 `-1`、内核给 tun 回默认值 1000、`LOWER_UP` 缺失时靠全局地址兜底、
+  `wan` 与 `wan6` 落在同一物理口等边界
 - `menu.test.js` 把上游 dispatcher 的 `resolve_firstchild()`、`ui.js` 的 `ui.menu.getChildren()`
   翻译成 JS 跑，用 `tools/fixtures/menu.d/` 里**原样抓下来的上游 menu.d** 构建菜单树
   （不是自己编的简化版），断言"登录落在 `admin/status/netview`"和"它在「状态」组排第一"。
@@ -395,7 +411,9 @@ node tools/argon-harness.js   # 另：重新生成 preview/argon-harness.html
 | 主图一直停在"正在采集数据"             | 首次采样没有基准值，等 3 秒；若一直如此说明后端没返回，登录路由器执行 `ubus call netview interfaces` 看输出           |
 | 连接状态显示"未连接互联网"但其实能上网      | 判断依据是 `ifstatus wan` 的 `up`。WAN 接口不叫 `wan`（多 WAN / 自定义名）时就会误报                       |
 | IP 地址显示"未获取"                 | 确认 `ip -4 addr show dev <wan设备> scope global` 有输出；WAN 设备名取自 `ifstatus` 的 `l3_device`      |
-| 网卡速率显示"—"                    | 无线、隧道以及部分虚拟设备没有 `speed` 属性；网桥会回落到成员端口，都没有就显示 `—`                          |
+| `pppoe-wan` / `utun` / `AmneziaWG` 状态写着"未连接"，但上下行明明有数据 | 1.1.2 及之前只按 `operstate` 判链路，而这几个点对点设备的 `operstate` 永远是 `unknown`。1.1.3 起改为综合 `IFF_UP` / `LOWER_UP` 与是否持有全局地址来判 |
+| 「网络接口状态」里某块显示"已连接"而不是速率   | 正常。PPP / tun / wireguard 没有可协商的链路，1.1.3 起改报链路状态词，不再印一个看着像"没状态"的 `—`            |
+| 隧道口显示了 1000 Mbit/s             | 1.1.3 起只有物理网卡（以及网桥的成员口）才报速率。部分内核对没有 phy 的设备会回 ethtool 的默认值 `1000`，照读就是假的 |
 | 标题变成一块窄白卡、副标题看不清或"缺一半"         | Argon 把每个 `h2` 都当标题卡片，副标题被挤到页头的 `header::after` 主色横带上（`#8898aa` 叠 `#5e72e4` 仅 1.42:1）。1.1.1 起已修；旧版本可临时在自定义 CSS 里加 `.nv-head h2 { padding:0; background:none; box-shadow:none }` 并把 `.nv-head` 加上背景色 |
 | 暗色模式下卡片全是白的                   | 暗色令牌误用了 `var(--oc-surface, …)`，而 Argon 的 `dark.css` 并不全局重定义 `--oc-*`，暗色下拿到的还是 `#fff`。1.1.1 起暗色值改为写死 |
 | 中文标题行距被压得很扁                   | Argon 有 `h1..h6 { line-height: 1.1 !important }`；1.1.1 起在标题重置里用 `!important` 压回去了                |

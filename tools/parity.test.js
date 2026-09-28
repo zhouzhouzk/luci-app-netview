@@ -130,6 +130,19 @@ if (!fs.existsSync(HARNESS)) {
 		same('测试页搬运的 .nv-root 与预览页逐字节一致（不一致就重新生成）',
 			inPreview, inHarness);
 	}
+
+	/* 上面只盯住了 .nv-root 那段静态骨架。渲染函数和 CSS 数组在 <script>
+	 * 里 —— 改了预览页却忘了重新生成时，骨架照样一致，测试页却会停在旧
+	 * 界面上，而它正是用来判断"装到路由器上长什么样"的。所以脚本里的渲染
+	 * 层也一起比。 */
+	const hScripts = [...harness.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
+	const hMain = hScripts.filter(s => s.includes(MARKER)).pop();
+	check('测试页里带完整脚本', !!hMain);
+	if (hMain) {
+		const hCut = hMain.lastIndexOf('/* ===', hMain.indexOf(MARKER));
+		same('测试页里的渲染层与预览页一致（不一致就重新生成）',
+			renderLayer, hMain.slice(0, hCut));
+	}
 }
 
 /* ---- 4. load both render layers ------------------------------------------ */
