@@ -39,7 +39,8 @@ if [ "$ACTION" = "uninstall" ]; then
 		rm -f /usr/share/luci/menu.d/luci-app-netview.json
 		rm -rf /www/luci-static/resources/view/netview
 		rm -rf /tmp/netview
-		rm -f /tmp/luci-indexcache
+		rm -f /tmp/luci-indexcache*
+		rm -rf /tmp/luci-modulecache/
 		/etc/init.d/rpcd reload 2>/dev/null || true
 	'
 	echo "==> 已卸载"
@@ -65,7 +66,10 @@ $SCP "$SRC/htdocs/luci-static/resources/view/netview/overview.js" \
 echo "==> 设置权限并重载 rpcd..."
 $SSH "$TARGET" '
 	chmod 755 /usr/libexec/rpcd/netview
-	rm -f /tmp/luci-indexcache
+	# 菜单缓存的实际文件名是 /tmp/luci-indexcache.<hash>.json，缓存的 key 里含
+	# menu.d 各文件的 inode/mtime/size —— 刚 scp 过来的文件 mtime 必然变了，
+	# 所以不删也会自动重建。这里删一下只是省得等，注意通配符不能少。
+	rm -f /tmp/luci-indexcache*
 	/etc/init.d/rpcd reload 2>/dev/null || /etc/init.d/rpcd restart
 	sleep 2
 	if ubus -v list netview >/dev/null 2>&1; then

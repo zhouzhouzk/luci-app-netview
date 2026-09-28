@@ -10,6 +10,8 @@ ImmortalWrt / OpenWrt 的实时网络流量查看器（LuCI 插件）。
 界面参考 [iStoreOS](https://github.com/istoreos) 的快速设置页：左侧一块大卡片放汇总流量曲线，
 右侧一列窄卡片放连接状态与接口信息，下方两张明细表。
 
+装好后它排在「状态」组的第一个，**也是登录后直接落在的页面** —— 详见[默认首页](#默认首页)。
+
 ## 界面
 
 ![界面预览（亮色）](docs/screenshot-light.png)
@@ -40,6 +42,80 @@ ImmortalWrt / OpenWrt 的实时网络流量查看器（LuCI 插件）。
 - **仅实时**：数据全部驻留内存，不落盘、不写数据库，重启即清空
 - **WAN / LAN 自动识别**：通过 `ifstatus` 解析逻辑接口，自动打标签并优先排序
 - **主图只统计 WAN**：不会把内网互传算成"上网流量"；识别不到 WAN 时退化为全部接口，保证图不空
+- **登录即首页**：登录后直接落在本页，不用再点一次菜单（见[默认首页](#默认首页)）
+
+## 默认首页
+
+**访问 `http://<路由器IP>/`，或者登录提交之后，落地的就是实时流量页。**
+
+靠的是 `menu.d` 里的一个数字：
+
+```json
+"admin/status/netview": {
+	"title": "网络流量",
+	"order": 0,
+	...
+}
+```
+
+它比「状态 > 概况」的 `order: 1` 小，所以在「状态」组里排第一，同时也是计算默认落地页时胜出的那一项。
+
+### 为什么一个 order 就能改掉首页
+
+LuCI 里是这几段串起来的（原文摘录在 `tools/fixtures/upstream/`，可逐行核对）：
+
+| # | 位置                                | 做的事                                                  |
+| - | --------------------------------- | ---------------------------------------------------- |
+| 1 | `dispatcher.uc` `build_pagetree()`  | 把每个 `menu.d` 的 `"a/b/c"` 展开成节点树                        |
+| 2 | `dispatcher.uc` `resolve_firstchild()` | 逐层挑 order 最小的可访问项 —— 这就是默认落地项                        |
+| 3 | `dispatcher.uc` 登录分支             | `http.redirect(build_url(...resolved.ctx.request_path))`，跳回第 2 步算出的路径 |
+| 4 | `ui.js` `ui.menu.getChildren()`     | 侧边栏的显示顺序（**另算一套**，不是同一个排序）                            |
+
+所以 `order` 看着只是"菜单里排第几"，实际同时是"登录后落在哪"。
+
+### 两个容易踩的点
+
+- **不能靠 order 打平取胜。** 第 2 步和第 4 步对"order 相同"的处理**不一样**：后端保留先遍历到的
+  （取决于 `menu.d` 的加载顺序），前端按 `L.naturalCompare(name)` 排。打平就可能出现"侧边栏在左边、
+  登录却落在右边"的错位。要赢就得**严格更小**。
+- **`order: 0` 是安全的。** 两处用的都是 `??`（nullish）—— `min(node.order ?? 9999, 9999)` 和
+  `order ?? 1000` —— 而不是 `||`；否则 0 会被当成 falsy 顶到菜单末尾。`tools/menu.test.js` 把这条也钉住了。
+
+### 想改回「概况」当首页
+
+把 `root/usr/share/luci/menu.d/luci-app-netview.json` 里的 `"order": 0` 改回 `30`（回到「状态」组末尾、
+不再抢首页），然后清一下菜单缓存：
+
+```sh
+rm -f /tmp/luci-indexcache*        # 通配符不能少，实际文件名是 luci-indexcache.<hash>.json
+/etc/init.d/rpcd reload
+```
+
+（菜单缓存的 key 里含各 `menu.d` 的 inode/mtime/size，文件一改就会自动重建，手工清只是省得等。）
+
+### 装了 luci-mod-dashboard 的话
+
+[luci-mod-dashboard](https://github.com/openwrt/luci/tree/master/modules/luci-mod-dashboard) 是独立的
+顶层首页插件，注册在 `admin/dashboard`、`order: 1`，比「状态」组的 `10` 更靠前 —— 它会**优先拿到首页**。
+这时本插件仍排在「状态」组第一，但登录落地页由 dashboard 决定。我们不去抢这个。
+
+真想让 netview 赢过它，得换层级：把 `"admin/status/netview"` 改成 `"admin/netview"` 并把 order 设成 `0`。
+代价是侧边栏会多出一个独立顶层项。`tools/menu.test.js` 里有一条断言记录了这个行为。
+
+### 菜单顺序的变化
+
+「网络流量」成为「状态」组第一项，「概况」退到第二位，其余不变：
+
+```
+状态
+  网络流量   ← 本插件，order 0
+  概况       ← 原第一项，order 1
+  路由
+  防火墙
+  系统日志
+  进程
+  实时信息
+```
 
 ## 依赖
 
@@ -81,8 +157,12 @@ luci-app-netview/
 ├── tools/                                       # 自检脚本，见「验证」一节
 │   ├── render.test.js                           # 渲染函数、曲线几何、刻度取整、对比度
 │   ├── parity.test.js                           # 预览页与视图的一致性
+│   ├── menu.test.js                             # 登录落地页与菜单顺序
 │   ├── backend.test.sh                          # 后端 shell 辅助函数（假 sysfs 树）
-│   └── argon-harness.js                         # 生成 preview/argon-harness.html
+│   ├── argon-harness.js                         # 生成 preview/argon-harness.html
+│   └── fixtures/                                # 测试基线，来源见其中的 SOURCE.md
+│       ├── menu.d/                              # 上游 menu.d 原始 JSON
+│       └── upstream/                            # 决定默认页与菜单顺序的上游源码摘录
 └── root/
     ├── usr/libexec/rpcd/netview                 # rpcd 后端脚本（ubus 对象 netview）
     ├── usr/share/rpcd/acl.d/luci-app-netview.json
@@ -96,19 +176,19 @@ luci-app-netview/
 ### 方式 A：直接下载 ipk（推荐）
 
 从 [Releases](https://github.com/zhouzhouzk/luci-app-netview/releases/latest) 下载
-`luci-app-netview_1.1.1-r1_all.ipk`，传到路由器安装：
+`luci-app-netview_1.1.2-r1_all.ipk`，传到路由器安装：
 
 ```sh
-scp luci-app-netview_1.1.1-r1_all.ipk root@192.168.1.1:/tmp/
-ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.1.1-r1_all.ipk'
+scp luci-app-netview_1.1.2-r1_all.ipk root@192.168.1.1:/tmp/
+ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.1.2-r1_all.ipk'
 ```
 
 也可以让路由器自己下载（省掉中转）：
 
 ```sh
 cd /tmp
-wget https://github.com/zhouzhouzk/luci-app-netview/releases/download/v1.1.1/luci-app-netview_1.1.1-r1_all.ipk
-opkg install luci-app-netview_1.1.1-r1_all.ipk
+wget https://github.com/zhouzhouzk/luci-app-netview/releases/download/v1.1.2/luci-app-netview_1.1.2-r1_all.ipk
+opkg install luci-app-netview_1.1.2-r1_all.ipk
 ```
 
 卸载：`opkg remove luci-app-netview`。
@@ -127,10 +207,10 @@ opkg install luci-app-netview_1.1.1-r1_all.ipk
 需要 Python 3，不需要 OpenWrt SDK：
 
 ```sh
-python build-ipk.py                    # 产物: dist/luci-app-netview_1.1.1-r1_all.ipk
+python build-ipk.py                    # 产物: dist/luci-app-netview_1.1.2-r1_all.ipk
 
-scp dist/luci-app-netview_1.1.1-r1_all.ipk root@192.168.1.1:/tmp/
-ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.1.1-r1_all.ipk'
+scp dist/luci-app-netview_1.1.2-r1_all.ipk root@192.168.1.1:/tmp/
+ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.1.2-r1_all.ipk'
 ```
 
 ### 方式 C：免编译一键部署
@@ -149,7 +229,7 @@ cd luci-app-netview
 ```sh
 cp -r luci-app-netview package/
 make package/luci-app-netview/compile V=s
-# 产物: bin/packages/*/base/luci-app-netview_1.1.1-r1_all.ipk
+# 产物: bin/packages/*/base/luci-app-netview_1.1.2-r1_all.ipk
 ```
 
 装完打开 `http://192.168.1.1/cgi-bin/luci/admin/status/netview`，菜单位置：**状态 → 网络流量**。
@@ -267,11 +347,12 @@ Argon 样式。一个文件同时覆盖明暗 —— `cascade.css` 常驻、`dar
 
 ## 验证
 
-仓库自带三组自检，只依赖 Node.js 与 POSIX shell，不需要路由器，也不需要 Argon：
+仓库自带四组自检，只依赖 Node.js 与 POSIX shell，不需要路由器，也不需要 Argon：
 
 ```sh
 node tools/render.test.js     # 渲染函数 / 曲线几何 / 刻度取整 / 主题碰撞 / 对比度
 node tools/parity.test.js     # 预览页与视图：CSS 与渲染输出必须逐字节一致
+node tools/menu.test.js       # 登录落地页与菜单顺序
 sh   tools/backend.test.sh    # 后端 shell 辅助函数（用假 sysfs 树跑）
 
 node tools/argon-harness.js   # 另：重新生成 preview/argon-harness.html
@@ -290,6 +371,12 @@ node tools/argon-harness.js   # 另：重新生成 preview/argon-harness.html
 - `backend.test.sh` 把脚本里硬编码的 `/sys/class/net` 重定向到临时假目录，
   真实执行 `if_speed` / `if_roles` / `addr_of`，覆盖网桥成员口回退、无线空值、
   隧道 `-1`、`wan` 与 `wan6` 落在同一物理口等边界
+- `menu.test.js` 把上游 dispatcher 的 `resolve_firstchild()`、`ui.js` 的 `ui.menu.getChildren()`
+  翻译成 JS 跑，用 `tools/fixtures/menu.d/` 里**原样抓下来的上游 menu.d** 构建菜单树
+  （不是自己编的简化版），断言"登录落在 `admin/status/netview`"和"它在「状态」组排第一"。
+  它带反证用例 —— 把 order 调回 30 必须退回概况页、装上 dashboard 必须让位 —— 否则
+  "测试通过"可能只是断言本身写错了。另外还会检查 `tools/fixtures/upstream/` 里那两段上游
+  源码摘录是否仍然支持这套做法（比如上游哪天开始读 `action.preferred`，就会失败报信）
 
 
 ## 排错
@@ -297,6 +384,8 @@ node tools/argon-harness.js   # 另：重新生成 preview/argon-harness.html
 | 现象                            | 处理                                                                                       |
 | ----------------------------- | ---------------------------------------------------------------------------------------- |
 | 菜单里没有「网络流量」                   | `rm -f /tmp/luci-indexcache* && rm -rf /tmp/luci-modulecache && /etc/init.d/rpcd reload`，再强制刷新浏览器（Ctrl+F5） |
+| 登录后没直接进实时流量页（还是概况页）       | 1.1.2 起本插件就是默认首页。先按上一行清菜单缓存；仍不行就确认 `menu.d` 里 `order` 没被改大 —— 它必须**严格小于**同组其它项；另外装了 `luci-mod-dashboard` 时首页归它 |
+| 菜单里「网络流量」排不到第一              | 同上，`order` 要严格小于「概况」的 `1`（本插件用 `0`）。注意 order 相同时**前端按名字自然序、后端按文件加载顺序**取，两边结果可能不一致，所以不能靠打平 |
 | 页面空白 / 报 `netview` 未找到        | 登录路由器执行 `ubus -v list netview`，无输出说明 rpcd 插件没加载成功，检查 `/usr/libexec/rpcd/netview` 是否有执行权限 |
 | 速率一直显示 0 B/s                   | 正常，第一次采样没有基准值，等 3 秒后自动出数                                                                 |
 | 设备排行提示「未开启流量记账」               | 执行 `sysctl -w net.netfilter.nf_conntrack_acct=1`；并在 `/etc/sysctl.d/11-nf-conntrack.conf` 里确认该值为 1，否则重启后失效 |

@@ -1,7 +1,7 @@
 {
 	"admin/status/netview": {
 		"title": "网络流量",
-		"order": 30,
+		"order": 0,
 		"action": {
 			"type": "view",
 			"path": "netview/overview"
