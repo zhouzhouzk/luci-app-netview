@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>luci-app-netview · Argon 主题预览</title>
+<style>
+	/* ===== Argon 主题的设计令牌（取自 luci-theme-argon cascade.css / dark.css 的真实取值） ===== */
+	:root {
+		--oc-accent: #5e72e4;
+		--oc-accent-a10: rgba(94, 114, 228, .10);
+		--oc-surface: #ffffff;
+		--oc-surface-muted: #f6f9fc;
+		--oc-border: #dee2e6;
+		--oc-text: #525f7f;
+		--oc-text-muted: #8898aa;
+		--background-color: #f4f5f7;
+		--success: #2dce89;
+		--warning: #fb6340;
+		--font-family-sans-serif: "Google Sans", -apple-system, BlinkMacSystemFont,
+			"Segoe UI", "PingFang SC", "Microsoft Yahei", Roboto, sans-serif;
+	}
+
+	body.nv-dark {
+		--oc-surface: #1e1e1e;
+		--oc-surface-muted: #252526;
+		--oc-border: #3c3c3c;
+		--oc-text: #cccccc;
+		--oc-text-muted: #a1a1aa;
+		--oc-accent-a10: rgba(94, 114, 228, .18);
+		--background-color: #1e1e1e;
+	}
+
+	* { box-sizing: border-box; }
+
+	body {
+		margin: 0;
+		padding: 0 0 40px;
+		background: var(--background-color);
+		color: var(--oc-text);
+		font-family: var(--font-family-sans-serif);
+		font-size: 13px;
+		line-height: 1.6;
+		transition: background .2s ease, color .2s ease;
+	}
+
+	.demo-bar {
+		display: flex; align-items: center; justify-content: space-between;
+		gap: 12px; flex-wrap: wrap;
+		padding: 12px 24px; margin-bottom: 20px;
+		border-bottom: 1px solid var(--oc-border);
+		background: var(--oc-surface);
+	}
+	.demo-bar .t { font-size: 13px; color: var(--oc-text-muted); }
+	.demo-bar .t b { color: var(--oc-text); font-weight: 500; }
+	.demo-bar button {
+		padding: 6px 14px; border-radius: 4px; cursor: pointer;
+		border: 1px solid var(--oc-border);
+		background: var(--oc-surface);
+		color: var(--oc-text);
+		font-family: inherit; font-size: 12px;
+		transition: background .15s ease;
+	}
+	.demo-bar button:hover { background: var(--oc-surface-muted); }
+
+	.main-content { max-width: 1040px; margin: 0 auto; padding: 0 24px; }
+
+	/* ===== 以下样式与 htdocs/.../netview/overview.js 中的 CSS 完全一致 ===== */
+	.nv-root { padding: 2px 0 26px; }
+
+	.nv-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 12px;
+	           margin: 0 0 16px; }
+	.nv-head h2 { margin: 0; font-size: 19px; font-weight: 500;
+	              color: var(--oc-text, #525f7f); }
+	.nv-sub { font-size: 12px; color: var(--oc-text-muted, #8898aa); }
+	.nv-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+	          background: var(--success, #2dce89); margin-right: 6px;
+	          vertical-align: baseline; }
+
+	.nv-grid { display: grid; gap: 14px;
+	           grid-template-columns: repeat(auto-fill, minmax(252px, 1fr)); }
+	.nv-card { background: var(--oc-surface, #fff);
+	           border: 1px solid var(--oc-border, #dee2e6);
+	           border-radius: 4px; padding: 14px 16px 12px;
+	           transition: box-shadow .2s ease, transform .2s ease; }
+	.nv-card:hover { box-shadow: 3px 4px 8px rgba(94, 114, 228, .16);
+	                 transform: translateY(-1px); }
+
+	.nv-card-hd { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+	.nv-ifname { font-size: 13px; font-weight: 500; color: var(--oc-text, #525f7f);
+	             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.nv-badge { flex: 0 0 auto; padding: 2px 7px; border-radius: 3px;
+	            font-size: 10px; font-weight: 500; line-height: 1.4;
+	            letter-spacing: .04em; color: #fff; }
+	.nv-badge.nv-wan { background: var(--oc-accent, #5e72e4); }
+	.nv-badge.nv-lan { background: var(--success, #2dce89); }
+
+	.nv-rates { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-bottom: 8px; }
+	.nv-rate { display: flex; align-items: baseline; gap: 5px; min-width: 0; }
+	.nv-arrow { font-size: 13px; line-height: 1; }
+	.nv-c-dn { color: var(--oc-accent, #5e72e4); }
+	.nv-c-up { color: var(--warning, #fb6340); }
+	.nv-num { font-size: 16px; font-weight: 500; white-space: nowrap;
+	          font-variant-numeric: tabular-nums;
+	          color: var(--oc-text, #525f7f); }
+
+	.nv-spark { display: block; width: 100%; height: 44px; margin: 2px 0 10px; }
+	.nv-spark path { fill: none; }
+	.nv-spark .nv-a-d { fill: var(--oc-accent-a10, rgba(94, 114, 228, .12)); }
+	.nv-spark .nv-l-d { stroke: var(--oc-accent, #5e72e4); }
+	.nv-spark .nv-l-u { stroke: var(--warning, #fb6340); }
+
+	.nv-total { display: flex; justify-content: space-between; gap: 10px;
+	            font-size: 11px; color: var(--oc-text-muted, #8898aa); }
+	.nv-total b { font-weight: 500; color: var(--oc-text, #525f7f);
+	              font-variant-numeric: tabular-nums; }
+
+	.nv-h3 { font-size: 15px; font-weight: 500; margin: 26px 0 12px;
+	         color: var(--oc-text, #525f7f); }
+	.nv-tablewrap { overflow-x: auto; border-radius: 4px;
+	                border: 1px solid var(--oc-border, #dee2e6);
+	                background: var(--oc-surface, #fff); }
+	.nv-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+	.nv-table th { text-align: left; padding: 9px 12px; white-space: nowrap;
+	               font-size: 11px; font-weight: 500; text-transform: uppercase;
+	               letter-spacing: .04em; color: var(--oc-text-muted, #8898aa);
+	               background: var(--oc-surface-muted, #f6f9fc);
+	               border-bottom: 1px solid var(--oc-border, #dee2e6); }
+	.nv-table td { padding: 9px 12px; vertical-align: middle;
+	               color: var(--oc-text, #525f7f);
+	               border-bottom: 1px solid var(--oc-border, #dee2e6); }
+	.nv-table tbody tr:last-child td { border-bottom: none; }
+	.nv-table tbody tr { transition: background .15s ease; }
+	.nv-table tbody tr:hover { background: var(--oc-surface-muted, #f6f9fc); }
+	.nv-devname { font-weight: 500; }
+	.nv-tnum { font-variant-numeric: tabular-nums; }
+	.nv-bar-cell { min-width: 190px; }
+	.nv-bar { height: 5px; border-radius: 3px; overflow: hidden; margin-bottom: 5px;
+	          background: var(--oc-border, #dee2e6); }
+	.nv-bar i { display: block; height: 100%; border-radius: 3px;
+	            background: var(--oc-accent, #5e72e4);
+	            transition: width .3s ease; }
+
+	.nv-empty { padding: 26px; text-align: center; font-size: 13px;
+	            border-radius: 4px; border: 1px dashed var(--oc-border, #dee2e6);
+	            background: var(--oc-surface, #fff);
+	            color: var(--oc-text-muted, #8898aa); }
+</style>
+</head>
+<body>
+
+<div class="demo-bar">
+	<span class="t"><b>Argon 主题预览</b> · 数据为模拟生成，实际插件数据来自 /proc/net/dev 与 nf_conntrack</span>
+	<button id="themeToggle" type="button">切换到暗色模式</button>
+</div>
+
+<div class="main-content">
+	<div class="nv-root">
+		<div class="nv-head">
+			<h2>实时流量</h2>
+			<span class="nv-sub" id="liveNote"></span>
+		</div>
+		<div class="nv-grid" id="ifbox"></div>
+		<h3 class="nv-h3">设备排行</h3>
+		<div id="devbox"></div>
+	</div>
+</div>
+
+<script>
+var POLL_INTERVAL = 1;
+var MAXPOINTS = 60;
+
+var history = {};
+
+function fmtBytes(n) {
+	n = Number(n) || 0;
+	var units = [ 'B', 'KB', 'MB', 'GB', 'TB', 'PB' ];
+	var i = 0;
+	while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+	return (i === 0 ? Math.round(n) : n.toFixed(2)) + ' ' + units[i];
+}
+function fmtRate(n) { return fmtBytes(n) + '/s'; }
+function esc(s) {
+	return String(s == null ? '' : s)
+		.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+		.replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function sparkline(points) {
+	var W = 200, H = 44;
+	if (!points || points.length < 2)
+		return '<svg class="nv-spark" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none"></svg>';
+	var max = 1;
+	points.forEach(function(p) { if (p.d > max) max = p.d; if (p.u > max) max = p.u; });
+	function line(key) {
+		var n = points.length, out = [];
+		for (var i = 0; i < n; i++) {
+			var x = (i / (n - 1)) * W;
+			var y = H - 2 - (points[i][key] / max) * (H - 5);
+			out.push((i ? 'L' : 'M') + x.toFixed(1) + ',' + y.toFixed(1));
+		}
+		return out.join(' ');
+	}
+	var downLine = line('d');
+	return '<svg class="nv-spark" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none">' +
+		'<path class="nv-a-d" d="' + downLine + ' L' + W + ',' + H + ' L0,' + H + ' Z"/>' +
+		'<path class="nv-l-d" d="' + downLine + '" stroke-width="1.5" vector-effect="non-scaling-stroke"/>' +
+		'<path class="nv-l-u" d="' + line('u') + '" stroke-width="1.5" vector-effect="non-scaling-stroke"/>' +
+	'</svg>';
+}
+
+function renderInterfaces(box, data) {
+	if (!data || !data.interfaces) return;
+	var order = { 'WAN': 0, 'LAN': 1, '': 2 };
+	var list = data.interfaces.slice(0).sort(function(a, b) {
+		var oa = order[a.role] != null ? order[a.role] : 2;
+		var ob = order[b.role] != null ? order[b.role] : 2;
+		if (oa !== ob) return oa - ob;
+		return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
+	});
+	list.forEach(function(it) {
+		var h = history[it.name] || (history[it.name] = []);
+		h.push({ d: Number(it.rx_rate) || 0, u: Number(it.tx_rate) || 0 });
+		while (h.length > MAXPOINTS) h.shift();
+	});
+	var html = '';
+	list.forEach(function(it) {
+		var badge = it.role
+			? '<span class="nv-badge nv-' + it.role.toLowerCase() + '">' + esc(it.role) + '</span>' : '';
+		html += '<div class="nv-card">' +
+			'<div class="nv-card-hd"><span class="nv-ifname">' + esc(it.name) + '</span>' + badge + '</div>' +
+			'<div class="nv-rates">' +
+				'<div class="nv-rate"><span class="nv-arrow nv-c-dn">\u2193</span>' +
+					'<span class="nv-num">' + fmtRate(it.rx_rate) + '</span></div>' +
+				'<div class="nv-rate"><span class="nv-arrow nv-c-up">\u2191</span>' +
+					'<span class="nv-num">' + fmtRate(it.tx_rate) + '</span></div>' +
+			'</div>' + sparkline(history[it.name]) +
+			'<div class="nv-total">' +
+				'<span>累计收 <b>' + fmtBytes(it.rx) + '</b></span>' +
+				'<span>累计发 <b>' + fmtBytes(it.tx) + '</b></span>' +
+			'</div></div>';
+	});
+	box.innerHTML = html || '<div class="nv-empty">未检测到网络接口</div>';
+}
+
+function renderDevices(box, data) {
+	if (!data) return;
+	if (data.error === 'conntrack_unavailable') {
+		box.innerHTML = '<div class="nv-empty">内核 conntrack 表不可用，无法统计设备流量</div>';
+		return;
+	}
+	var list = (data.devices || []).slice(0).sort(function(a, b) {
+		return ((b.down + b.up) - (a.down + a.up));
+	}).slice(0, 20);
+	if (!list.length) {
+		box.innerHTML = '<div class="nv-empty">暂无活动的 NAT / 转发连接</div>';
+		return;
+	}
+	var max = (list[0].down + list[0].up) || 1;
+	var html = '<div class="nv-tablewrap"><table class="nv-table"><thead><tr>' +
+		'<th>设备</th><th>IP</th><th>下行</th><th>上行</th><th>累计流量</th><th>连接数</th>' +
+	'</tr></thead><tbody>';
+	list.forEach(function(d) {
+		var total = d.down + d.up;
+		var pct = Math.max(2, Math.min(100, (total / max) * 100));
+		html += '<tr>' +
+			'<td class="nv-devname">' + esc(d.host && d.host !== '-' ? d.host : '未知设备') + '</td>' +
+			'<td class="nv-tnum">' + esc(d.ip) + '</td>' +
+			'<td class="nv-tnum nv-c-dn">' + fmtRate(d.down_rate) + '</td>' +
+			'<td class="nv-tnum nv-c-up">' + fmtRate(d.up_rate) + '</td>' +
+			'<td class="nv-bar-cell"><div class="nv-bar"><i style="width:' + pct.toFixed(1) + '%"></i></div>' +
+				'<span class="nv-tnum">' + fmtBytes(total) + '</span></td>' +
+			'<td class="nv-tnum">' + (Number(d.conns) || 0) + '</td>' +
+		'</tr>';
+	});
+	html += '</tbody></table></div>';
+	box.innerHTML = html;
+}
+
+/* ---------------------- 模拟数据源 ---------------------- */
+
+var STATIC_IFACES = [
+	{ name: 'pppoe-wan', role: 'WAN', rx: 2147483648000, tx: 348966092800,  base_rx: 4.2e6, base_tx: 9.0e5 },
+	{ name: 'br-lan',    role: 'LAN', rx: 5632000000000, tx: 1221000000000, base_rx: 4.4e6, base_tx: 1.1e6 },
+	{ name: 'wlan0',     role: '',    rx: 321000000000,  tx: 90000000000,   base_rx: 2.4e5, base_tx: 1.2e5 }
+];
+var STATIC_DEVS = [
+	{ ip: '192.168.1.100', host: 'my-laptop', down: 18.4e9, up: 5.1e9, base_d: 2.4e6, base_u: 3.1e5, conns: 42 },
+	{ ip: '10.0.0.7',      host: 'nas-box',   down: 41.2e9, up: 2.8e9, base_d: 1.2e6, base_u: 4.0e5, conns: 7  },
+	{ ip: '192.168.1.150', host: 'tv-box',    down: 22.7e9, up: 3.3e8, base_d: 3.8e6, base_u: 2.0e4, conns: 5  },
+	{ ip: '192.168.1.101', host: 'phone',     down: 9.2e9,  up: 1.1e9, base_d: 8.0e5, base_u: 1.2e5, conns: 18 },
+	{ ip: '192.168.1.102', host: '-',         down: 3.1e9,  up: 6.4e8, base_d: 2.1e5, base_u: 4.0e4, conns: 11 }
+];
+
+var state = { ifaces: [], devs: [] };
+
+function seed() {
+	STATIC_IFACES.forEach(function(t) {
+		state.ifaces.push({ name: t.name, role: t.role, rx: t.rx, tx: t.tx, rx_rate: 0, tx_rate: 0,
+			cur_rx: t.base_rx, cur_tx: t.base_tx, base_rx: t.base_rx, base_tx: t.base_tx });
+	});
+	STATIC_DEVS.forEach(function(t) {
+		state.devs.push({ ip: t.ip, host: t.host, down: t.down, up: t.up, down_rate: 0, up_rate: 0,
+			cur_d: t.base_d, cur_u: t.base_u, base_d: t.base_d, base_u: t.base_u, conns: t.conns });
+	});
+}
+
+function drift(cur, base, spread) {
+	var next = cur * (1 + (Math.random() - 0.5) * spread);
+	var lo = base * 0.08, hi = base * 3.2;
+	if (next < lo) next = lo + Math.random() * lo;
+	if (next > hi) next = hi - Math.random() * hi * 0.3;
+	return next;
+}
+
+function tick(silent) {
+	var dt = POLL_INTERVAL;
+	state.ifaces.forEach(function(i) {
+		i.cur_rx = drift(i.cur_rx, i.base_rx, 0.55);
+		i.cur_tx = drift(i.cur_tx, i.base_tx, 0.55);
+		i.rx += i.cur_rx * dt;
+		i.tx += i.cur_tx * dt;
+		i.rx_rate = i.cur_rx;
+		i.tx_rate = i.cur_tx;
+	});
+	state.devs.forEach(function(d) {
+		d.cur_d = drift(d.cur_d, d.base_d, 0.75);
+		d.cur_u = drift(d.cur_u, d.base_u, 0.75);
+		d.down += d.cur_d * dt;
+		d.up += d.cur_u * dt;
+		d.down_rate = d.cur_d;
+		d.up_rate = d.cur_u;
+	});
+	if (silent) return;
+	renderInterfaces(document.getElementById('ifbox'), { interfaces: state.ifaces });
+	renderDevices(document.getElementById('devbox'), { devices: state.devs });
+}
+
+seed();
+for (var i = 0; i < MAXPOINTS; i++) {
+	tick(true);
+	state.ifaces.forEach(function(it) {
+		var h = history[it.name] || (history[it.name] = []);
+		h.push({ d: it.rx_rate, u: it.tx_rate });
+	});
+}
+
+document.getElementById('liveNote').innerHTML =
+	'<span class="nv-dot"></span>每 ' + POLL_INTERVAL + ' 秒刷新（预览加速）· 曲线保留最近 ' +
+	(MAXPOINTS * POLL_INTERVAL) + ' 秒';
+
+document.getElementById('themeToggle').addEventListener('click', function() {
+	var dark = document.body.classList.toggle('nv-dark');
+	this.textContent = dark ? '切换到浅色模式' : '切换到暗色模式';
+});
+
+tick(false);
+setInterval(function() { tick(false); }, POLL_INTERVAL * 1000);
+</script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+{
+	"luci-app-netview": {
+		"description": "Grant access to NetView realtime traffic monitor",
+		"read": {
+			"ubus": {
+				"netview": [ "interfaces", "devices" ]
+			}
+		}
+	}
+}

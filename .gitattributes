@@ -1,0 +1,7 @@
+# 仓库里的文件一律使用 LF 行尾。
+# 这个项目里有 shell 脚本和 rpcd 插件，CRLF 会导致路由器上执行时报
+# "not found"（实际上是 shebang 后的 \r 被当成解释器名字的一部分）。
+* text=auto eol=lf
+
+# 构建产物按二进制处理，永远不做行尾转换
+*.ipk binary

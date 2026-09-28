@@ -1,0 +1,15 @@
+# ---- build output ----
+# dist/ holds generated .ipk artefacts; rebuild them with `python build-ipk.py`
+dist/
+*.ipk
+
+# ---- python ----
+__pycache__/
+*.py[cod]
+
+# ---- editors / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

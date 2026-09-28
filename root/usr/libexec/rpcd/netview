@@ -1,0 +1,292 @@
+#!/bin/sh
+#
+# luci-app-netview -- rpcd backend
+#
+# Exposes ubus object "netview" with two methods:
+#   interfaces  -> per-interface realtime rx/tx rate + lifetime counters
+#   devices     -> per-LAN-client traffic aggregated from nf_conntrack
+#
+# Target: ImmortalWrt / OpenWrt 21.02 .. 24.10  (developed for 24.10 x86/64)
+#
+
+. /usr/share/libubox/jshn.sh
+
+WORKDIR="/tmp/netview"
+STATE_IF="$WORKDIR/if.state"
+STATE_DEV="$WORKDIR/dev.state"
+TMP_SNAP="$WORKDIR/if.snap"
+TMP_IF="$WORKDIR/if.diff"
+TMP_RAW="$WORKDIR/dev.raw"
+TMP_DEV="$WORKDIR/dev.diff"
+
+mkdir -p "$WORKDIR"
+
+# ---------------------------------------------------------------- helpers ---
+
+# Dump /proc/net/dev as:  <ifname> <rx_bytes> <tx_bytes>
+snapshot_if() {
+	awk 'NR > 2 {
+		gsub(":", "", $1)
+		if ($1 == "lo") next
+		printf "%s %s %s\n", $1, $2, $10
+	}' /proc/net/dev
+}
+
+# Resolve the L3 device behind a logical netifd interface (wan / lan).
+# jshn is used rather than jsonfilter: it is already loaded for output, so this
+# keeps the package free of an extra dependency. jshn's default variable prefix
+# is empty, so json_get_var reads the same J_V_* names that `jshn -r` emits.
+l3_device() {
+	local iface="$1" dev out
+	out=$(ifstatus "$iface" 2>/dev/null)
+	if [ -n "$out" ]; then
+		json_init
+		json_load "$out"
+		json_get_var dev l3_device
+	fi
+	[ -n "$dev" ] || dev=$(uci -q get network."$iface".device)
+	[ -n "$dev" ] || dev=$(uci -q get network."$iface".ifname)
+	printf '%s' "$dev"
+}
+
+# Classify an interface name into WAN / LAN / ""
+if_role() {
+	local name="$1" wan="$2" lan="$3"
+	if [ -n "$wan" ] && [ "$name" = "$wan" ]; then
+		echo "WAN"; return
+	fi
+	if [ -n "$lan" ] && [ "$name" = "$lan" ]; then
+		echo "LAN"; return
+	fi
+	case "$name" in
+		br-lan)              echo "LAN" ;;
+		wan|wan6)            echo "WAN" ;;
+		pppoe-*|wwan*|usb*)  echo "WAN" ;;
+		*)                   echo "" ;;
+	esac
+}
+
+# ------------------------------------------------------------- interfaces ---
+
+do_interfaces() {
+	local now wan lan
+	now=$(date +%s)
+	wan=$(l3_device wan)
+	lan=$(l3_device lan)
+	[ -n "$lan" ] || lan="br-lan"
+
+	snapshot_if > "$TMP_SNAP"
+
+	# Rate = (bytes_now - bytes_prev) / (t_now - t_prev)
+	if [ -s "$STATE_IF" ]; then
+		awk -v now="$now" -v have=1 '
+		NR == FNR {
+			if (FNR == 1) { prevt = $1 + 0; next }
+			prx[$1] = $2 + 0
+			ptx[$1] = $3 + 0
+			next
+		}
+		{
+			dt = now - prevt
+			if (dt <= 0) dt = 1
+			rx = $2 - prx[$1]; if (rx < 0) rx = 0
+			tx = $3 - ptx[$1]; if (tx < 0) tx = 0
+			printf "%s %s %s %.2f %.2f\n", $1, $2, $3, rx / dt, tx / dt
+		}' "$STATE_IF" "$TMP_SNAP" > "$TMP_IF"
+	else
+		awk '{ printf "%s %s %s 0.00 0.00\n", $1, $2, $3 }' "$TMP_SNAP" > "$TMP_IF"
+	fi
+
+	# Persist this sample for the next round
+	{ echo "$now"; cat "$TMP_SNAP"; } > "$STATE_IF"
+
+	json_init
+	json_add_int "timestamp" "$now"
+	json_add_string "wan" "$wan"
+	json_add_string "lan" "$lan"
+	json_add_array "interfaces"
+
+	while read -r name rx tx drx dtx; do
+		[ -n "$name" ] || continue
+		json_add_object
+		json_add_string "name" "$name"
+		json_add_string "role" "$(if_role "$name" "$wan" "$lan")"
+		json_add_int    "rx" "$rx"
+		json_add_int    "tx" "$tx"
+		json_add_double "rx_rate" "$drx"
+		json_add_double "tx_rate" "$dtx"
+		json_close_object
+	done < "$TMP_IF"
+
+	json_close_array
+	json_dump
+}
+
+# ---------------------------------------------------------------- devices ---
+
+do_devices() {
+	local now leases ct
+	now=$(date +%s)
+
+	leases="/tmp/dhcp.leases"
+	[ -f "$leases" ] || leases="/dev/null"
+
+	ct="/proc/net/nf_conntrack"
+	[ -r "$ct" ] || ct="/proc/net/ip_conntrack"
+
+	if [ ! -r "$ct" ]; then
+		json_init
+		json_add_int "timestamp" "$now"
+		json_add_array "devices"
+		json_close_array
+		json_add_string "error" "conntrack_unavailable"
+		json_dump
+		return
+	fi
+
+	# Per-flow byte counters only exist while connection tracking accounting is
+	# on. Netfilter defaults to acct=0; OpenWrt turns it on through
+	# /etc/sysctl.d/11-nf-conntrack.conf (shipped by kmod-nf-conntrack), but the
+	# switch is frequently flipped off again by "reduce NAT memory" advice. With
+	# it off, conntrack lines carry no bytes= field at all and every device
+	# would silently report 0 B -- so say so explicitly instead.
+	acct=0
+	flows=0
+	if grep -qm1 'bytes=' "$ct" 2>/dev/null; then
+		acct=1
+	fi
+	flows=$(grep -c 'src=' "$ct" 2>/dev/null)
+	: "${flows:=0}"
+
+	if [ "$acct" = "0" ] && [ "$flows" -gt 0 ]; then
+		json_init
+		json_add_int "timestamp" "$now"
+		json_add_array "devices"
+		json_close_array
+		json_add_string "error" "conntrack_acct_disabled"
+		json_dump
+		return
+	fi
+
+	# Aggregate conntrack entries per private (LAN side) address.
+	# original tuple  = the initiating direction
+	# reply tuple     = bytes flowing back
+	awk '
+	function ispriv(ip) {
+		if (ip ~ /^192\.168\./) return 1
+		if (ip ~ /^10\./) return 1
+		if (ip ~ /^172\.(1[6-9]|2[0-9]|3[01])\./) return 1
+		return 0
+	}
+	FNR == NR {
+		if (NF >= 4) { nm[$3] = $4; mc[$3] = $2 }
+		next
+	}
+	# /proc/net/nf_conntrack prefixes IPv4 lines with "ipv4", but the legacy
+	# /proc/net/ip_conntrack does not. Matching on src= copes with both while
+	# still skipping IPv6 lines, which start with "ipv6".
+	/^ipv6/ { next }
+	/src=/ {
+		s1 = ""; d1 = ""; b1 = 0; b2 = 0; n = 0; m = 0
+		for (i = 1; i <= NF; i++) {
+			v = $i
+			if (v ~ /^src=/) {
+				n++
+				if (n == 1) s1 = substr(v, 5)
+			}
+			else if (v ~ /^dst=/) {
+				if (n == 1) d1 = substr(v, 5)
+			}
+			else if (v ~ /^bytes=/) {
+				m++
+				t = substr(v, 7) + 0
+				if (m == 1) b1 = t
+				else if (m == 2) b2 = t
+			}
+		}
+		if (s1 != "" && ispriv(s1)) {
+			up[s1] += b1; dn[s1] += b2; cn[s1]++
+		}
+		else if (d1 != "" && ispriv(d1)) {
+			up[d1] += b2; dn[d1] += b1; cn[d1]++
+		}
+	}
+	END {
+		# "-" placeholder: an empty field would collapse under FS/IFS splitting
+		# and shift every following column.
+		for (ip in cn)
+			printf "%s\t%s\t%d\t%d\t%d\n", ip, (ip in nm && nm[ip] != "" ? nm[ip] : "-"), up[ip], dn[ip], cn[ip]
+	}
+	' "$leases" "$ct" > "$TMP_RAW"
+
+	# Rate = delta against the previous aggregate
+	awk -v now="$now" -v st="$STATE_DEV" '
+	BEGIN {
+		FS = "\t"
+		have = 0
+		while ((getline l < st) > 0) {
+			have = 1
+			c++
+			if (c == 1) { pt = l + 0; continue }
+			split(l, a, "\t")
+			pu[a[1]] = a[3] + 0
+			pd[a[1]] = a[4] + 0
+		}
+		dt = now - pt
+		if (dt <= 0) dt = 1
+	}
+	{
+		# A client that was not present in the previous sample has no baseline,
+		# so its rate is reported as 0 instead of its whole lifetime counter.
+		if (have && ($1 in pu)) {
+			du = $3 - pu[$1]; if (du < 0) du = 0
+			dd = $4 - pd[$1]; if (dd < 0) dd = 0
+			ur = du / dt
+			dr = dd / dt
+		} else {
+			ur = 0; dr = 0
+		}
+		printf "%s\t%s\t%d\t%d\t%.2f\t%.2f\t%d\n", $1, $2, $3, $4, dr, ur, $5
+	}
+	' "$TMP_RAW" > "$TMP_DEV"
+
+	{ echo "$now"; cat "$TMP_RAW"; } > "$STATE_DEV"
+
+	json_init
+	json_add_int "timestamp" "$now"
+	json_add_array "devices"
+
+	while IFS="$(printf '\t')" read -r ip host up down dr ur conns; do
+		[ -n "$ip" ] || continue
+		json_add_object
+		json_add_string "ip" "$ip"
+		json_add_string "host" "$host"
+		json_add_int    "up" "$up"
+		json_add_int    "down" "$down"
+		json_add_double "up_rate" "$ur"
+		json_add_double "down_rate" "$dr"
+		json_add_int    "conns" "$conns"
+		json_close_object
+	done < "$TMP_DEV"
+
+	json_close_array
+	json_dump
+}
+
+# ------------------------------------------------------------------ entry ---
+
+case "$1" in
+	list)
+		echo '{ "interfaces": {}, "devices": {} }'
+		;;
+	call)
+		case "$2" in
+			interfaces) do_interfaces ;;
+			devices)    do_devices ;;
+			*)          echo '{}' ;;
+		esac
+		;;
+	*)
+		echo '{}'
+		;;
+esac

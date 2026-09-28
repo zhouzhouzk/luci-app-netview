@@ -1,0 +1,13 @@
+{
+	"admin/status/netview": {
+		"title": "网络流量",
+		"order": 30,
+		"action": {
+			"type": "view",
+			"path": "netview/overview"
+		},
+		"depends": {
+			"acl": [ "luci-app-netview" ]
+		}
+	}
+}
