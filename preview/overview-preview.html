@@ -702,14 +702,20 @@ var DEVICES = [
 ];
 
 function sampleDevices() {
-	return { devices: DEVICES.map(function(d) {
-		d.base[0] += (2.6e5 * envelope(tick, d.base[0] % 7)) * POLL_INTERVAL;
-		d.base[1] += (4.0e4 * envelope(tick, d.base[1] % 5)) * POLL_INTERVAL;
+	/* 相位必须逐设备不同。早期版本拿 base 值取模当相位，而这些 base 又都是
+	 * 10 的倍数，取模后清一色为 0 —— 七台设备的上行速率因此完全相同，
+	 * 一眼就能看出是假数据。改用下标推相位。 */
+	return { devices: DEVICES.map(function(d, i) {
+		var pd = i * 1.9, pu = i * 2.7;
+
+		d.base[0] += (2.6e5 * envelope(tick, pd)) * POLL_INTERVAL;
+		d.base[1] += (4.0e4 * envelope(tick, pu)) * POLL_INTERVAL;
+
 		return {
 			ip: d.ip, host: d.host,
 			down: Math.round(d.base[0]), up: Math.round(d.base[1]),
-			down_rate: 2.4e5 * envelope(tick, d.base[0] % 7),
-			up_rate: 3.4e4 * envelope(tick, d.base[1] % 5),
+			down_rate: 2.4e5 * envelope(tick, pd),
+			up_rate: 3.4e4 * envelope(tick, pu),
 			conns: d.conns
 		};
 	}) };

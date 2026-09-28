@@ -10,6 +10,20 @@ ImmortalWrt / OpenWrt 的实时网络流量查看器（LuCI 插件）。
 界面参考 [iStoreOS](https://github.com/istoreos) 的快速设置页：左侧一块大卡片放汇总流量曲线，
 右侧一列窄卡片放连接状态与接口信息，下方两张明细表。
 
+## 界面
+
+![界面预览（亮色）](docs/screenshot-light.png)
+
+<details>
+<summary>暗色模式</summary>
+
+![界面预览（暗色）](docs/screenshot-dark.png)
+
+</details>
+
+> 截图取自 `preview/overview-preview.html`，用模拟数据渲染 —— 所以设备名、IP、速率都是编的。
+> 在路由器上打开 `/cgi-bin/luci/admin/status/netview` 看到的是同样版式、真实数据。
+
 ## 功能
 
 | 区块        | 内容                                                    | 数据来源                            |
@@ -60,6 +74,9 @@ luci-app-netview/
 │   └── overview.js                              # 前端视图
 ├── preview/
 │   └── overview-preview.html                    # 本地界面预览（模拟数据，双击打开）
+├── docs/                                        # README 用的界面截图
+│   ├── screenshot-light.png
+│   └── screenshot-dark.png
 ├── tools/                                       # 自检脚本，见「验证」一节
 │   ├── render.test.js                           # 渲染函数、曲线几何、刻度取整
 │   ├── parity.test.js                           # 预览页与视图的一致性
@@ -69,6 +86,8 @@ luci-app-netview/
     ├── usr/share/rpcd/acl.d/luci-app-netview.json
     └── usr/share/luci/menu.d/luci-app-netview.json
 ```
+
+打包只取 `htdocs/` 和 `root/`；`preview/`、`docs/`、`tools/` 都是开发用的，不会进 ipk。
 
 ## 安装
 
