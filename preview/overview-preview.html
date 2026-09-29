@@ -1079,7 +1079,6 @@ function uploadFeatureFile(file, stateEl, onDone) {
 	}).then(function(res) {
 		if (res && res.installed === true) {
 			stateEl.innerHTML = featUploadState('done', res);
-			if (onDone) onDone();
 		}
 		else {
 			stateEl.innerHTML =
@@ -1087,7 +1086,12 @@ function uploadFeatureFile(file, stateEl, onDone) {
 		}
 	}).catch(function(err) {
 		stateEl.innerHTML = featUploadState('failed',
-			err && err.upload ? err.reason : '上传中断，请重试');
+			err && err.upload ? err.reason :
+			'上传中断（网络或会话超时），请重新选择文件再试');
+	}).finally(function() {
+		/* 无论成败都要复位轮询开关并刷新一次 —— 否则一次失败会让卡片
+		 * 从此不再刷新，旧的失败红条就一直挂着误导人。 */
+		if (onDone) onDone();
 	});
 }
 

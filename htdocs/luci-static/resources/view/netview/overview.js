@@ -1151,7 +1151,6 @@ function uploadFeatureFile(file, stateEl, onDone) {
 	}).then(function(res) {
 		if (res && res.installed === true) {
 			stateEl.innerHTML = featUploadState('done', res);
-			if (onDone) onDone();
 		}
 		else {
 			stateEl.innerHTML =
@@ -1159,7 +1158,12 @@ function uploadFeatureFile(file, stateEl, onDone) {
 		}
 	}).catch(function(err) {
 		stateEl.innerHTML = featUploadState('failed',
-			err && err.upload ? err.reason : '上传中断，请重试');
+			err && err.upload ? err.reason :
+			'上传中断（网络或会话超时），请重新选择文件再试');
+	}).finally(function() {
+		/* 无论成败都要复位轮询开关并刷新一次 —— 否则一次失败会让卡片
+		 * 从此不再刷新，旧的失败红条就一直挂着误导人。 */
+		if (onDone) onDone();
 	});
 }
 
@@ -1390,10 +1394,13 @@ return view.extend({
 			var file = inp.files && inp.files[0];
 			if (!file) return;
 
-			/* 不立刻传 —— 先出确认条，用户点"确认上传"再开始。 */
+			/* 不立刻传 —— 先出确认条，用户点"确认上传"再开始。
+			 * 同时清掉上一轮的状态条，免得旧红条悬在那误导。 */
 			pendingFile = file;
 			var bar = featBox.querySelector('[data-role="feat-confirmbar"]');
+			var state = featBox.querySelector('[data-role="feat-upstate"]');
 			if (bar) bar.innerHTML = featConfirm(file, curFeatVer);
+			if (state) state.innerHTML = '';
 			inp.value = '';
 		});
 
