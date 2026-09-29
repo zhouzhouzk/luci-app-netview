@@ -551,11 +551,14 @@ sed \
 	-e "s#^OAF_ICONS_DIR=.*#OAF_ICONS_DIR=\"$SB/www/app_icons\"#" \
 	-e "s#^FEAT_UP_TMP=.*#FEAT_UP_TMP=\"$SB/work/feature.upload\"#" \
 	-e "s#^FEAT_EXTRACT=.*#FEAT_EXTRACT=\"$SB/work/featup\"#" \
+	-e "s#^OAF_SYSCTL=.*#OAF_SYSCTL=\"$SB/proc/sys/oaf\"#" \
 	-e "s#/sys/class/net#$SB/sys/class/net#g" \
 	-e "s#^\. /usr/share/libubox/jshn.sh#. \"$SB/jshn.sh\"#" \
 	"$SRC" > "$SB/netview.rpc"
 
-mkdir -p "$SB/appfilter" "$SB/www/app_icons"
+mkdir -p "$SB/appfilter" "$SB/www/app_icons" "$SB/proc/sys/oaf"
+printf 'br-lan\n' > "$SB/proc/sys/oaf/lan_ifname"
+printf '0\n'      > "$SB/proc/sys/oaf/work_mode"
 printf '#version v26.04.10\n#format v3.0\n#id name:[proto]\n1001 YouTube:[tcp;;443;youtube;;]\n2001 王者荣耀:[tcp;;;;;00:33]\n' \
 	> "$SB/appfilter/feature.cfg"
 # rpc() runs the full backend entry. Calls that pass a request payload pipe it
@@ -570,6 +573,11 @@ OUT=$(FAKE_OAF=old rpc features < /dev/null)
 ck "标记本地上传可用"     "$(printf '%s' "$OUT" | grep -c '"local_upload":1')" "1"
 ck "读到本地版本"        "$(printf '%s' "$OUT" | grep -c '"version":"v26.04.10"')" "1"
 ck "读到应用数"          "$(printf '%s' "$OUT" | grep -c '"app_count":2')" "1"
+# 夹具 conntrack 有 8 条 IPv4 连接、mark 全为 0 —— 正是"识别不出来"的现场
+ck "自检报出连接数"       "$(printf '%s' "$OUT" | grep -c '"flows":8')" "1"
+ck "自检报出零识别"       "$(printf '%s' "$OUT" | grep -c '"marked":0')" "1"
+ck "自检读到 lan_ifname"  "$(printf '%s' "$OUT" | grep -c '"lan_ifname":"br-lan"')" "1"
+ck "自检读到 work_mode"   "$(printf '%s' "$OUT" | grep -c '"work_mode":"0"')" "1"
 
 echo ""
 echo "=== feature_upload（base64 分块落盘）==="

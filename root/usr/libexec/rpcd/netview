@@ -454,6 +454,54 @@ cfg_version() { sed -n 's/^#version[ \t]*//p'  "$OAF_CFG_FILE" 2>/dev/null | hea
 cfg_format()  { sed -n 's/^#format[ \t]*//p'   "$OAF_CFG_FILE" 2>/dev/null | head -n1; }
 cfg_apps()    { grep -c '^[0-9][0-9]* ' "$OAF_CFG_FILE" 2>/dev/null; }
 
+# Kernel-side switches of the old-generation module (/proc/sys/oaf/*). The DPI
+# hook bails out early unless the ingress device name contains lan_ifname, and
+# only the gateway work mode stamps conntrack marks -- so these two decide
+# whether the per-app column can ever fill.
+OAF_SYSCTL="/proc/sys/oaf"
+oaf_sysctl() { cat "$OAF_SYSCTL/$1" 2>/dev/null | head -n1; }
+
+# "<flows> <marked>": IPv4 connections, and how many carry an app id in the low
+# 16 bits of their mark. marked=0 with flows>0 means DPI is not stamping.
+ct_mark_stats() {
+	local t="$CT_TABLE"
+	[ -r "$t" ] || t="$CT_TABLE_ALT"
+	[ -r "$t" ] || { echo "0 0"; return; }
+	awk '
+	function hx(s,   i, d, r) {
+		sub(/^0x/, "", s); r = 0
+		for (i = 1; i <= length(s); i++) {
+			d = index("0123456789abcdef", tolower(substr(s, i, 1))) - 1
+			if (d < 0) break
+			r = r * 16 + d
+		}
+		return r
+	}
+	/^ipv6/ { next }
+	/src=/ {
+		f++
+		for (i = 1; i <= NF; i++) if ($i ~ /^mark=/) {
+			v = substr($i, 6); m = (v ~ /^0x/) ? hx(v) : v + 0
+			if (m % 65536 > 0) k++
+			break
+		}
+	}
+	END { printf "%d %d\n", f, k }' "$t"
+}
+
+# The diag object shared by both generations of `features`.
+feat_diag() {
+	local st
+	st=$(ct_mark_stats)
+	json_add_object "diag"
+	json_add_int    "flows"      "$(num_or0 "${st% *}")"
+	json_add_int    "marked"     "$(num_or0 "${st#* }")"
+	json_add_string "lan_ifname" "$(oaf_sysctl lan_ifname)"
+	json_add_string "work_mode"  "$(oaf_sysctl work_mode)"
+	json_add_string "enable"     "$(oaf_sysctl enable)"
+	json_close_object
+}
+
 # Has oaf.ko been loaded?
 oaf_mod() {
 	local p
@@ -1120,6 +1168,7 @@ do_features() {
 			json_close_object
 			feat_update "$(printf '%s' '{"state":"idle"}' | json_flat \
 				"state stage status_code message id icons_skipped download_total download_now elapsed")"
+			feat_diag
 			json_dump
 			return
 			;;

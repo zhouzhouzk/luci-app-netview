@@ -108,9 +108,9 @@ var POLL_INTERVAL = 3;
 var MAXPOINTS = 60;
 var MAX_DEVICES = 20;
 
-/* 一条 ubus 消息约 64 KiB 上限，base64 膨胀 4/3 —— 每块带 36KB 二进制，
- * 编码后 48KB，留足 JSON 信封的余量。 */
-var UPLOAD_CHUNK = 36 * 1024;
+/* uhttpd 的 ubus POST 上限 64 KiB，base64 膨胀 4/3 —— 每块带 24KB 二进制，
+ * 编码后 32KB，给 JSON-RPC 信封留足一半余量。 */
+var UPLOAD_CHUNK = 24 * 1024;
 var ICON_BASE = '/luci-static/resources/app_icons/';
 
 var C_DOWN = '#4a9df5';
@@ -921,6 +921,7 @@ function featHtml(f) {
 			'</div>' +
 			'<div data-role="feat-confirmbar"></div>' +
 			'<div data-role="feat-upstate"></div>' +
+			featDiag(f.diag) +
 			featStatus(f.update) +
 			'</div>';
 	}
@@ -966,6 +967,29 @@ function featHtml(f) {
 	}).join('');
 
 	return '<div class="nv-feat">' + hd + rows + featStatus(up) + '</div>';
+}
+
+/* 识别链路自检：应用列为什么是空的，一行说清楚。
+ * 内核 DPI 只在入口网卡名包含 lan_ifname、且处于网关模式时才给 conntrack
+ * 打应用标记 —— 这两项不对，特征库再新也认不出任何东西。 */
+function featDiag(d) {
+	if (!d) return '';
+	var flows = Number(d.flows) || 0, marked = Number(d.marked) || 0;
+	var parts = [
+		'连接 ' + fmtInt(flows) + ' 条，已识别 ' + fmtInt(marked) + ' 条'
+	];
+	if (d.lan_ifname) parts.push('lan_ifname=' + esc(d.lan_ifname));
+	if (d.work_mode !== '' && d.work_mode != null)
+		parts.push('work_mode=' + esc(d.work_mode) +
+			(String(d.work_mode) === '0' ? '（网关）' : '（旁路）'));
+
+	var tip = '';
+	if (flows > 0 && marked === 0)
+		tip = '<br>内核还没给任何连接打应用标记：检查 lan_ifname 是否为你的 LAN 网桥名' +
+		      '（通常是 br-lan），并确认 OAF 已在「服务 → 应用过滤」中启用';
+
+	return '<div class="nv-feat-meta" data-role="feat-diag" style="margin-top:8px">' +
+		'识别自检：' + parts.join(' · ') + tip + '</div>';
 }
 
 /* 上传前的确认条：显示文件信息，用户点了确认才真正开始传输。 */
@@ -1085,9 +1109,24 @@ function uploadFeatureFile(file, stateEl, onDone) {
 				featUploadState('failed', res && res.reason, res && res.format);
 		}
 	}).catch(function(err) {
-		stateEl.innerHTML = featUploadState('failed',
-			err && err.upload ? err.reason :
-			'上传中断（网络或会话超时），请重新选择文件再试');
+		var msg;
+		if (err && err.upload) {
+			msg = err.reason;
+		}
+		else {
+			/* 把 LuCI rpc 的真实错误透出来，别再笼统地说"中断" */
+			var raw = String((err && err.message) || err || '');
+			if (/access denied|permission/i.test(raw))
+				msg = '会话没有上传权限（Access denied）—— 请退出 LuCI 重新登录后再试。' +
+				      '新版本新增的接口只对重新登录后的会话生效';
+			else if (/timed? ?out/i.test(raw))
+				msg = '请求超时（' + raw + '），请重试';
+			else if (/not found/i.test(raw))
+				msg = '后端没有这个接口（' + raw + '）—— 执行 /etc/init.d/rpcd reload 后重新登录';
+			else
+				msg = '上传中断：' + (raw || '未知错误');
+		}
+		stateEl.innerHTML = featUploadState('failed', msg);
 	}).finally(function() {
 		/* 无论成败都要复位轮询开关并刷新一次 —— 否则一次失败会让卡片
 		 * 从此不再刷新，旧的失败红条就一直挂着误导人。 */
@@ -1337,7 +1376,8 @@ var FEATURES = {
 	supported: false, gen: 'old', reason: 'no_online_api', local_upload: true,
 	local: { version: 'v26.04.10', format: 'v3.0', app_count: 13560,
 	         size: 4823449, modified: 1758000000 },
-	update: { state: 'idle' }
+	update: { state: 'idle' },
+	diag: { flows: 3412, marked: 1287, lan_ifname: 'br-lan', work_mode: '0', enable: '1' }
 };
 
 function sampleFeatures() { return FEATURES; }

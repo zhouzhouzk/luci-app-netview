@@ -151,7 +151,7 @@ function loadViewApi(src) {
 	s = s.replace('return view.extend(', 'view.extend(');
 	const EXPORT = '\n;return { sideHtml, ifTableHtml, connHtml, chartSvg, sparkSvg,' +
 		' aggregate, renderDevices, appsHtml, APP_STATE_HINT, fmtBytes, fmtRate,' +
-		' fmtDuration, fmtProto, fmtSpeed, truthy, featHtml, featStatus, featUploadState, CSS };\n';
+		' fmtDuration, fmtProto, fmtSpeed, truthy, featHtml, featStatus, featUploadState, featDiag, CSS };\n';
 	const f = new Function('view', 'rpc', 'poll', 'E', s + EXPORT);
 	return f({ extend: o => o }, { declare: () => () => Promise.resolve(null) },
 	         { add: () => {}, start: () => {} }, () => ({}));
@@ -160,7 +160,7 @@ function loadViewApi(src) {
 function loadPreviewApi(layer) {
 	const EXPORT = '\n;return { sideHtml, ifTableHtml, connHtml, chartSvg, sparkSvg,' +
 		' aggregate, renderDevices, appsHtml, APP_STATE_HINT, fmtBytes, fmtRate,' +
-		' fmtDuration, fmtProto, fmtSpeed, truthy, featHtml, featStatus, featUploadState, CSS };\n';
+		' fmtDuration, fmtProto, fmtSpeed, truthy, featHtml, featStatus, featUploadState, featDiag, CSS };\n';
 	return new Function(layer + EXPORT)();
 }
 

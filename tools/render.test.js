@@ -17,7 +17,7 @@ src = src.replace('return view.extend(', 'view.extend(');
 const EXPORT = '\n;return { sideHtml, ifTableHtml, connHtml, svcColor, chartSvg,' +
 	' sparkSvg, aggregate, renderDevices, fmtBytes, fmtRate, fmtDuration, fmtProto,' +
 	' fmtSpeed, fmtInt, CSS, truthy, niceMax, smoothPath, appsHtml, APP_STATE_HINT,' +
-	' featHtml, featStatus, featUploadState };\n';
+	' featHtml, featStatus, featUploadState, featDiag };\n';
 
 const viewStub = { extend: (o) => o };
 const rpcStub  = { declare: () => () => Promise.resolve(null) };
@@ -552,6 +552,18 @@ check('失败原因翻译',
 	API.featUploadState('failed', 'extract_failed').includes('解压失败'));
 check('未知原因不产生 undefined',
 	dirty(API.featUploadState('failed', undefined, undefined)) === null);
+
+/* 识别链路自检行 */
+const dgOk = API.featDiag({ flows: 120, marked: 37, lan_ifname: 'br-lan', work_mode: '0' });
+check('自检显示连接与已识别数', dgOk.includes('120') && dgOk.includes('37'));
+check('自检显示 lan_ifname 与网关模式', dgOk.includes('br-lan') && dgOk.includes('网关'));
+check('有识别时不出排障提示', dgOk.indexOf('还没给任何连接') === -1);
+const dgBad = API.featDiag({ flows: 80, marked: 0, lan_ifname: 'eth0', work_mode: '1' });
+check('零识别时给出排障提示', dgBad.includes('还没给任何连接') && dgBad.includes('旁路'));
+check('无 diag 不渲染', API.featDiag(undefined) === '');
+check('旧架构卡片带自检行',
+	API.featHtml({ supported: false, local_upload: 1, local: {}, diag: { flows: 1, marked: 0 } })
+		.includes('识别自检'));
 
 /* 应用图标：厂商包按 <appid>.png 命名，两级回退（default.png -> 折叠）。 */
 const appIconOut = API.appsHtml({ apps: [{ name: 'YouTube', id: '1001', up: 1, down: 1 }] });
