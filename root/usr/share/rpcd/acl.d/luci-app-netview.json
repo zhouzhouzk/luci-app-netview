@@ -3,7 +3,12 @@
 		"description": "Grant access to NetView realtime traffic monitor",
 		"read": {
 			"ubus": {
-				"netview": [ "interfaces", "devices", "sessions" ]
+				"netview": [ "interfaces", "devices", "sessions", "features" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"netview": [ "feature_update" ]
 			}
 		}
 	}

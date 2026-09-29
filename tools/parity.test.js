@@ -150,8 +150,8 @@ function loadViewApi(src) {
 	let s = src.replace(/^'require [^']*';$/gm, '');
 	s = s.replace('return view.extend(', 'view.extend(');
 	const EXPORT = '\n;return { sideHtml, ifTableHtml, connHtml, chartSvg, sparkSvg,' +
-		' aggregate, renderDevices, fmtBytes, fmtRate, fmtDuration, fmtProto, fmtSpeed,' +
-		' truthy, CSS };\n';
+		' aggregate, renderDevices, appsHtml, APP_STATE_HINT, fmtBytes, fmtRate,' +
+		' fmtDuration, fmtProto, fmtSpeed, truthy, featHtml, featStatus, CSS };\n';
 	const f = new Function('view', 'rpc', 'poll', 'E', s + EXPORT);
 	return f({ extend: o => o }, { declare: () => () => Promise.resolve(null) },
 	         { add: () => {}, start: () => {} }, () => ({}));
@@ -159,8 +159,8 @@ function loadViewApi(src) {
 
 function loadPreviewApi(layer) {
 	const EXPORT = '\n;return { sideHtml, ifTableHtml, connHtml, chartSvg, sparkSvg,' +
-		' aggregate, renderDevices, fmtBytes, fmtRate, fmtDuration, fmtProto, fmtSpeed,' +
-		' truthy, CSS };\n';
+		' aggregate, renderDevices, appsHtml, APP_STATE_HINT, fmtBytes, fmtRate,' +
+		' fmtDuration, fmtProto, fmtSpeed, truthy, featHtml, featStatus, CSS };\n';
 	return new Function(layer + EXPORT)();
 }
 
@@ -190,21 +190,53 @@ if (viewApi && prevApi) {
 	same('sideHtml 输出一致', viewApi.sideHtml(IF), prevApi.sideHtml(IF));
 	same('ifTableHtml 输出一致', viewApi.ifTableHtml(IF), prevApi.ifTableHtml(IF));
 
-	const SESS_OAF = {
-		count: 3412, max: 65536, source: 'oaf',
-		services: [ { name: '视频', count: 9 }, { name: '游戏', count: 5 },
-		            { name: '其他', count: 6 } ]
-	};
 	const SESS_PORT = {
-		count: 10, max: 100, source: 'port',
+		count: 10, max: 100,
 		services: [ { name: 'HTTPS', count: 3 }, { name: '其他', count: 1 } ]
 	};
-	same('connHtml 输出一致（OAF）', viewApi.connHtml(SESS_OAF), prevApi.connHtml(SESS_OAF));
 	same('connHtml 输出一致（端口）', viewApi.connHtml(SESS_PORT), prevApi.connHtml(SESS_PORT));
 	same('connHtml 输出一致（空）', viewApi.connHtml(null), prevApi.connHtml(null));
 	same('connHtml 输出一致（max=0）',
 		viewApi.connHtml({ count: 5, max: 0, services: [] }),
 		prevApi.connHtml({ count: 5, max: 0, services: [] }));
+
+	const apps = [ { name: 'YouTube', up: 1024, down: 7168 },
+	               { name: '抖音', up: 512, down: 512 } ];
+	same('appsHtml 输出一致（有应用）',
+		viewApi.appsHtml({ apps: apps }), prevApi.appsHtml({ apps: apps }));
+	same('appsHtml 输出一致（无应用）',
+		viewApi.appsHtml({ apps: [] }), prevApi.appsHtml({ apps: [] }));
+	same('appsHtml 输出一致（null）',
+		viewApi.appsHtml({ apps: null }), prevApi.appsHtml({ apps: null }));
+	same('APP_STATE_HINT 一致',
+		JSON.stringify(viewApi.APP_STATE_HINT), JSON.stringify(prevApi.APP_STATE_HINT));
+
+	/* 特征库卡片（本版新增），两侧必须一致 */
+	const feat = {
+		supported: true, token: 1,
+		current: { version: '2026.08.30', app_count: 13422 },
+		online: { files: [
+			{ id: '1001', version: '2026.09.20', count: 13560, date: '2026-09-20',
+			  md5: 'ab', desc: '新增 xxx 识别' }
+		] },
+		update: { state: 'idle' }
+	};
+	same('featHtml 输出一致（在线目录）',
+		viewApi.featHtml(feat), prevApi.featHtml(feat));
+	same('featHtml 输出一致（老架构）',
+		viewApi.featHtml({ supported: false, reason: 'no_online_api' }),
+		prevApi.featHtml({ supported: false, reason: 'no_online_api' }));
+	same('featHtml 输出一致（无 OAF）',
+		viewApi.featHtml({ supported: false, reason: 'no_oaf' }),
+		prevApi.featHtml({ supported: false, reason: 'no_oaf' }));
+	same('featStatus 输出一致（下载中）',
+		viewApi.featStatus({ state: 'running', stage: '下载', download_now: 30, download_total: 100 }),
+		prevApi.featStatus({ state: 'running', stage: '下载', download_now: 30, download_total: 100 }));
+	same('featStatus 输出一致（失败）',
+		viewApi.featStatus({ state: 'running', message: 'invalid file id' }),
+		prevApi.featStatus({ state: 'running', message: 'invalid file id' }));
+	same('featStatus 输出一致（idle）',
+		viewApi.featStatus({ state: 'idle' }), prevApi.featStatus({ state: 'idle' }));
 
 	const hist = [];
 	for (let i = 0; i < 60; i++) hist.push({ d: 1.7e6 * (1 + Math.sin(i / 9)), u: 3e5 });
@@ -217,6 +249,22 @@ if (viewApi && prevApi) {
 	viewApi.renderDevices(boxA, dev);
 	prevApi.renderDevices(boxB, dev);
 	same('renderDevices 输出一致', boxA.innerHTML, boxB.innerHTML);
+
+	// 带应用明细与状态提示的那一版，两侧也必须一致（应用列是这一版新加的）
+	const devApps = {
+		apps_state: 'ok',
+		devices: [ { ip: '192.168.9.101', host: 'MacBook-Pro.lan', down: 8.4e6, up: 9.1e5,
+		             down_rate: 2.4e5, up_rate: 3.4e4, conns: 42, apps: apps } ]
+	};
+	const boxC = { innerHTML: '' }, boxD = { innerHTML: '' };
+	viewApi.renderDevices(boxC, devApps);
+	prevApi.renderDevices(boxD, devApps);
+	same('renderDevices 输出一致（带应用）', boxC.innerHTML, boxD.innerHTML);
+
+	const boxE = { innerHTML: '' }, boxF = { innerHTML: '' };
+	viewApi.renderDevices(boxE, { apps_state: 'no_oaf', devices: [] });
+	prevApi.renderDevices(boxF, { apps_state: 'no_oaf', devices: [] });
+	same('renderDevices 输出一致（无 OAF 提示）', boxE.innerHTML, boxF.innerHTML);
 
 	same('aggregate 一致', JSON.stringify(viewApi.aggregate(IF.interfaces)),
 		JSON.stringify(prevApi.aggregate(IF.interfaces)));

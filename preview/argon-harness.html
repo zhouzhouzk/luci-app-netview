@@ -82,6 +82,14 @@
 			</div>
 			<div class="nv-tablewrap" id="devtab"></div>
 		</div>
+
+		<div class="nv-sec">
+			<div class="nv-sec-hd">
+				<h3>应用识别</h3>
+				<span>特征库由 OAF（kmod-oaf + oafd）提供，用于把设备上的应用编号换成名字</span>
+			</div>
+			<div class="nv-featwrap" id="feattab"></div>
+		</div>
 	</div>
 				<!-- ↑↑↑ .nv-root 结束 ↑↑↑ -->
 			</div>
@@ -306,6 +314,15 @@ var CSS = [
 	'.nv-ifname { font-weight: 600; }',
 	'.nv-devname { font-weight: 600; }',
 	'.nv-devip { color: var(--nv-muted); font-variant-numeric: tabular-nums; }',
+	'.nv-devapps { display: flex; flex-wrap: wrap; gap: 3px 9px; margin-top: 3px;',
+	'              font-size: 11px; font-weight: 400; color: var(--nv-muted); }',
+	'.nv-devapps span { display: inline-flex; align-items: baseline; gap: 4px;',
+	'                   max-width: 100%; }',
+	'.nv-devapps em { font-style: normal; overflow: hidden; text-overflow: ellipsis;',
+	'                 white-space: nowrap; max-width: 108px; }',
+	'.nv-devapps b { font-weight: 600; color: var(--nv-text);',
+	'                font-variant-numeric: tabular-nums; }',
+	'.nv-apphint { text-align: center; }',
 
 	'.nv-badge { display: inline-block; margin-left: 7px; padding: 1px 7px;',
 	'            border-radius: 999px; font-size: 10px; font-weight: 600;',
@@ -332,7 +349,38 @@ var CSS = [
 	'            border: 1px dashed var(--nv-border); border-radius: var(--nv-radius); }',
 	'.nv-hint { display: block; margin-top: 8px; font-size: 11.5px; }',
 	'.nv-empty code { padding: 1px 6px; border-radius: 4px; font-size: 12px;',
-	'                 background: var(--nv-bg); color: var(--nv-text); }'
+	'                 background: var(--nv-bg); color: var(--nv-text); }',
+
+	/* ---- 特征库卡片 ---- */
+	'.nv-feat { padding: 14px 16px; background: var(--nv-card);',
+	'           border: 1px solid var(--nv-border); border-radius: var(--nv-radius); }',
+	'.nv-feat-hd { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;',
+	'             margin-bottom: 10px; }',
+	'.nv-feat-hd b { font-size: 13px; }',
+	'.nv-feat-ver { color: var(--nv-up); font-weight: 600;',
+	'              font-variant-numeric: tabular-nums; }',
+	'.nv-feat-meta { color: var(--nv-muted); font-size: 11.5px; }',
+	'.nv-feat-row { display: flex; align-items: center; gap: 10px; padding: 8px 2px;',
+	'               border-top: 1px solid var(--nv-border); }',
+	'.nv-feat-row:first-of-type { border-top: none; }',
+	'.nv-feat-info { flex: 1; min-width: 0; }',
+	'.nv-feat-info b { font-size: 12px; }',
+	'.nv-feat-info span { display: block; color: var(--nv-muted); font-size: 11px;',
+	'                      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+	'.nv-feat-btn { flex: none; padding: 4px 12px; border: 1px solid var(--nv-border);',
+	'               border-radius: 6px; background: var(--nv-bg); color: var(--nv-text);',
+	'               font-size: 11.5px; cursor: pointer; }',
+	'.nv-feat-btn:hover { border-color: var(--nv-up); color: var(--nv-up); }',
+	'.nv-feat-btn[disabled] { opacity: .5; cursor: not-allowed; }',
+	'.nv-feat-status { margin-top: 10px; padding: 8px 10px; border-radius: 6px;',
+	'                  font-size: 11.5px; background: var(--nv-bg); }',
+	'.nv-feat-status.running { color: #d97706; }',
+	'.nv-feat-status.done { color: #16a34a; }',
+	'.nv-feat-status.failed { color: #dc2626; }',
+	'.nv-feat-bar { height: 4px; border-radius: 2px; background: var(--nv-border);',
+	'               margin-top: 6px; overflow: hidden; }',
+	'.nv-feat-bar i { display: block; height: 100%; background: var(--nv-up);',
+	'                transition: width .3s ease; }'
 ].join('\n');
 
 /* ------------------------------------------------------------------ icons --- */
@@ -744,6 +792,36 @@ function ifTableHtml(d) {
 
 /* ------------------------------------------------------------ device table --- */
 
+/* 每台设备用到的应用及其流量。
+ *
+ * 数据来自内核给 conntrack 打的应用标记 + 连接字节数，所以这是真实字节，
+ * 不是 OAF 自己 ubus 接口里的访问时长。只有被识别出来的连接才计入，
+ * 各项相加小于设备总量是正常的 —— 差额就是没认出来的流量，不硬凑。 */
+function appsHtml(d) {
+	var apps = Array.isArray(d.apps) ? d.apps : [];
+	if (!apps.length)
+		return '';
+
+	var parts = apps.map(function(a) {
+		var down = Number(a.down) || 0;
+		var up = Number(a.up) || 0;
+		return '<span title="' + esc(a.name + '　下行 ' + fmtBytes(down) +
+			'　上行 ' + fmtBytes(up)) + '">' +
+			'<em>' + esc(a.name) + '</em>' +
+			'<b>' + fmtBytes(down + up) + '</b></span>';
+	});
+
+	return '<div class="nv-devapps">' + parts.join('') + '</div>';
+}
+
+/* 看不到应用时说明卡在哪一环，而不是让那一列莫名其妙地空着。 */
+var APP_STATE_HINT = {
+	no_oaf:   '装上 OAF（kmod-oaf 内核模块 + appfilter 守护进程）后，' +
+	          '每台设备下面会列出它用到的应用与流量',
+	no_names: 'OAF 在运行，但读不到它的特征库，暂时无法把应用编号换成名字',
+	no_mark:  'OAF 已就绪，但还没有连接被识别出来 —— 有点流量经过后就会出现'
+};
+
 function renderDevices(box, data) {
 	if (!data) { box.innerHTML = '<div class="nv-empty">无法读取设备数据</div>'; return; }
 
@@ -776,7 +854,10 @@ function renderDevices(box, data) {
 		var total = d.down + d.up;
 		var pct = Math.max(3, Math.min(100, (total / max) * 100));
 		html += '<tr>' +
-			'<td class="nv-devname">' + esc(d.host && d.host !== '-' ? d.host : '未知设备') + '</td>' +
+			'<td class="nv-devname">' +
+				esc(d.host && d.host !== '-' ? d.host : '未知设备') +
+				appsHtml(d) +
+			'</td>' +
 			'<td class="nv-devip">' + esc(d.ip) + '</td>' +
 			'<td class="nv-num nv-dn nv-r">' + fmtRate(d.down_rate) + '</td>' +
 			'<td class="nv-num nv-up nv-r">' + fmtRate(d.up_rate) + '</td>' +
@@ -786,7 +867,97 @@ function renderDevices(box, data) {
 		'</tr>';
 	});
 
-	box.innerHTML = html + '</tbody></table>';
+	var hint = APP_STATE_HINT[data.apps_state];
+	box.innerHTML = html + '</tbody></table>' +
+		(hint ? '<div class="nv-hint nv-apphint">' + hint + '</div>' : '');
+}
+
+/* ------------------------------------------------------ feature library --- */
+
+/* OAF 特征库卡片。特征库是加密的（magic + CRC 头），本地只能读到大小和时间，
+ * 版本 / 应用数 / 在线目录全来自 oafd 的 ubus 接口。只有新架构（fwx）有在线
+ * 更新这一整套，老架构（appfilter）直接说"不支持"。 */
+function featHtml(f) {
+	if (!f)
+		return '<div class="nv-empty">无法读取 OAF 特征库信息</div>';
+
+	/* 老架构 / 没装 OAF：如实说明，不画空壳。 */
+	if (f.supported !== true && f.supported !== 1) {
+		var why = {
+			no_oaf:        '没有检测到 OAF（kmod-oaf + oafd 都没就绪），无法做应用识别',
+			no_online_api: '当前 OAF 是旧架构（appfilter），不带在线更新接口'
+		}[f.reason] || '当前环境不支持特征库在线更新';
+		return '<div class="nv-empty">' + esc(why) + '</div>';
+	}
+
+	var cur = f.current || {};
+	var up = f.update || {};
+	var files = Array.isArray(f.online && f.online.files) ? f.online.files : [];
+
+	var hd = '<div class="nv-feat-hd">' +
+		'<b>应用特征库</b>' +
+		'<span class="nv-feat-ver">' + esc(cur.version || '未知版本') + '</span>' +
+		'<span class="nv-feat-meta">' +
+			(Number(cur.app_count) > 0 ? fmtInt(cur.app_count) + ' 个应用' : '未加载') +
+			(f.token === true || f.token === 1 ? ' · 已授权' : '') +
+		'</span></div>';
+
+	if (!files.length) {
+		return '<div class="nv-feat">' + hd +
+			'<div class="nv-feat-meta">在线目录为空 —— 稍后或点刷新重试</div>' +
+			featStatus(up) + '</div>';
+	}
+
+	var rows = files.map(function(x) {
+		var desc = x.desc || '';
+		return '<div class="nv-feat-row">' +
+			'<div class="nv-feat-info">' +
+				'<b>' + esc(x.version || '') + '</b>' +
+				'<span>' + esc(desc) + '　' +
+					(fmtInt(x.count) !== '0' ? fmtInt(x.count) + ' 应用 · ' : '') +
+					esc(x.date || '') + '</span>' +
+			'</div>' +
+			'<button class="nv-feat-btn" data-fid="' + esc(x.id || '') + '"' +
+				' data-fmd5="' + esc(x.md5 || '') + '">更新</button>' +
+		'</div>';
+	}).join('');
+
+	return '<div class="nv-feat">' + hd + rows + featStatus(up) + '</div>';
+}
+
+/* 下载 / 安装状态条。oafd 用 state/stage 两个字段 + 一个百分比友好的
+ * download_now/download_total 表达进度。 */
+function featStatus(up) {
+	up = up || {};
+	var state = up.state || 'idle';
+	var pct = 0;
+
+	if (Number(up.download_total) > 0)
+		pct = Math.min(100, Number(up.download_now) * 100 / Number(up.download_total));
+
+	var cls = 'nv-feat-status';
+	var txt = '';
+
+	if (state === 'idle' || state === '' || state === 'idle') {
+		return '';
+	}
+
+	if (up.message) {
+		txt = esc(up.message);
+		cls += ' failed';
+	}
+	else if (up.stage) {
+		txt = '正在' + esc(up.stage) + '…' +
+			(pct > 0 ? ' ' + pct.toFixed(0) + '%' : '');
+		cls += ' running';
+	}
+	else {
+		txt = '更新进行中';
+		cls += ' running';
+	}
+
+	var bar = pct > 0 ? '<div class="nv-feat-bar"><i style="width:' + pct + '%"></i></div>' : '';
+	return '<div class="' + cls + '">' + txt + bar + '</div>';
 }
 
 function aggregate(list) {
@@ -809,7 +980,8 @@ var el = {
 	side:  document.getElementById('side'),
 	conn:  document.getElementById('conn'),
 	iftab: document.getElementById('iftab'),
-	devtab:document.getElementById('devtab')
+	devtab:document.getElementById('devtab'),
+	feattab: document.getElementById('feattab')
 };
 
 /* 每个接口在预览里的模拟状态。
@@ -890,34 +1062,53 @@ function sampleIfaces() {
 	return out;
 }
 
+/* 每台设备用到的应用，写成 [名称, 下行占比, 上行占比] —— 占比相对设备自身的
+ * base，这样应用数字会跟着设备总量一起动，不会出现"设备涨、应用不动"的假象。
+ * 最后两台故意不挂应用：真机上没被识别出来的设备就是这样，空着才对。 */
 var DEVICES = [
-	{ ip: '192.168.9.101', host: 'MacBook-Pro.lan',  base: [ 8.4e6, 9.1e5 ], conns: 42 },
-	{ ip: '192.168.9.102', host: 'DESKTOP-7K3.lan',  base: [ 5.1e6, 3.4e5 ], conns: 28 },
-	{ ip: '192.168.9.118', host: 'iPhone-15.lan',    base: [ 2.2e6, 1.9e5 ], conns: 17 },
-	{ ip: '192.168.9.120', host: 'nas.lan',          base: [ 1.6e6, 6.2e6 ], conns: 9 },
-	{ ip: '192.168.9.133', host: '-',                base: [ 4.1e5, 7.4e4 ], conns: 6 },
-	{ ip: '192.168.9.144', host: 'raspberrypi.lan',  base: [ 1.8e5, 3.2e4 ], conns: 4 },
-	{ ip: '192.168.9.150', host: 'TV-Box.lan',       base: [ 9.2e6, 1.1e5 ], conns: 3 }
+	{ ip: '192.168.9.101', host: 'MacBook-Pro.lan', base: [ 8.4e6, 9.1e5 ], conns: 42,
+	  apps: [ [ 'YouTube', 0.62, 0.18 ], [ 'GitHub', 0.09, 0.31 ], [ 'Steam', 0.05, 0.04 ] ] },
+	{ ip: '192.168.9.102', host: 'DESKTOP-7K3.lan', base: [ 5.1e6, 3.4e5 ], conns: 28,
+	  apps: [ [ '哔哩哔哩', 0.44, 0.12 ], [ '微信', 0.08, 0.22 ] ] },
+	{ ip: '192.168.9.118', host: 'iPhone-15.lan',   base: [ 2.2e6, 1.9e5 ], conns: 17,
+	  apps: [ [ '抖音', 0.51, 0.15 ], [ 'QQ 音乐', 0.13, 0.05 ] ] },
+	{ ip: '192.168.9.120', host: 'nas.lan',         base: [ 1.6e6, 6.2e6 ], conns: 9,
+	  apps: [ [ '阿里云盘', 0.30, 0.71 ] ] },
+	{ ip: '192.168.9.133', host: '-',               base: [ 4.1e5, 7.4e4 ], conns: 6,
+	  apps: [ [ '王者荣耀', 0.74, 0.33 ] ] },
+	{ ip: '192.168.9.144', host: 'raspberrypi.lan', base: [ 1.8e5, 3.2e4 ], conns: 4 },
+	{ ip: '192.168.9.150', host: 'TV-Box.lan',      base: [ 9.2e6, 1.1e5 ], conns: 3,
+	  apps: [ [ '爱奇艺', 0.83, 0.21 ], [ 'Netflix', 0.11, 0.06 ] ] }
 ];
 
 function sampleDevices() {
 	/* 相位必须逐设备不同。早期版本拿 base 值取模当相位，而这些 base 又都是
 	 * 10 的倍数，取模后清一色为 0 —— 七台设备的上行速率因此完全相同，
 	 * 一眼就能看出是假数据。改用下标推相位。 */
-	return { devices: DEVICES.map(function(d, i) {
-		var pd = i * 1.9, pu = i * 2.7;
+	return {
+		apps_state: 'ok',
+		devices: DEVICES.map(function(d, i) {
+			var pd = i * 1.9, pu = i * 2.7;
 
-		d.base[0] += (2.6e5 * envelope(tick, pd)) * POLL_INTERVAL;
-		d.base[1] += (4.0e4 * envelope(tick, pu)) * POLL_INTERVAL;
+			d.base[0] += (2.6e5 * envelope(tick, pd)) * POLL_INTERVAL;
+			d.base[1] += (4.0e4 * envelope(tick, pu)) * POLL_INTERVAL;
 
-		return {
-			ip: d.ip, host: d.host,
-			down: Math.round(d.base[0]), up: Math.round(d.base[1]),
-			down_rate: 2.4e5 * envelope(tick, pd),
-			up_rate: 3.4e4 * envelope(tick, pu),
-			conns: d.conns
-		};
-	}) };
+			return {
+				ip: d.ip, host: d.host,
+				down: Math.round(d.base[0]), up: Math.round(d.base[1]),
+				down_rate: 2.4e5 * envelope(tick, pd),
+				up_rate: 3.4e4 * envelope(tick, pu),
+				conns: d.conns,
+				apps: (d.apps || []).map(function(a) {
+					return {
+						name: a[0],
+						down: Math.round(d.base[0] * a[1]),
+						up:   Math.round(d.base[1] * a[2])
+					};
+				})
+			};
+		})
+	};
 }
 
 var WAN_INFO = {
@@ -926,13 +1117,11 @@ var WAN_INFO = {
 	gateway: '100.64.0.1', dns: '192.168.9.1 223.5.5.5', dns_auto: true
 };
 
-/* 连接概况的两副面孔。实机上后端二选一：装了 OAF 给应用分类，否则给端口
- * 归类。预览页用按钮手动切，这样两种形态都能看到。
- *
- * 注意两边的占比口径不同 —— port 是连接数占比，oaf 是"用到该分类的设备
- * 数"占比。OAF 只上报时长、不上报字节，所以它给不出真正的流量占比。 */
+/* 连接概况：连接跟踪表的实时占用 + 这些连接都连去了哪儿。
+ * 只做端口归类 —— 应用维度在设备排行那一列，那里靠 conntrack 上的应用
+ * 标记（OAF 打的）+ bytes= 算出真实字节数，比端口更接近"谁在用网"。 */
 var SESSIONS_PORT = {
-	count: 3412, max: 65536, source: 'port',
+	count: 3412, max: 65536,
 	services: [
 		{ name: 'HTTPS', count: 1820 },
 		{ name: 'QUIC',  count: 640 },
@@ -941,20 +1130,6 @@ var SESSIONS_PORT = {
 		{ name: '其他',  count: 588 }
 	]
 };
-
-var SESSIONS_OAF = {
-	count: 3412, max: 65536, source: 'oaf',
-	services: [
-		{ name: '视频', count: 9 },
-		{ name: '聊天', count: 8 },
-		{ name: '游戏', count: 5 },
-		{ name: '音乐', count: 4 },
-		{ name: '下载', count: 3 },
-		{ name: '其他', count: 6 }
-	]
-};
-
-var connMode = 'port';
 
 function refresh() {
 	var ifaces = sampleIfaces();
@@ -977,11 +1152,32 @@ function refresh() {
 		wan_info: WAN_INFO, interfaces: ifaces
 	});
 	el.iftab.innerHTML = ifTableHtml({ interfaces: ifaces });
-	el.conn.innerHTML = connHtml(connMode === 'oaf' ? SESSIONS_OAF : SESSIONS_PORT);
+	el.conn.innerHTML = connHtml(SESSIONS_PORT);
 	renderDevices(el.devtab, sampleDevices());
+	el.feattab.innerHTML = featHtml(sampleFeatures());
 
 	tick++;
 }
+
+/* 应用识别卡的模拟数据：新架构（fwx）在线目录里放两个可更新条目。 */
+var FEATURES = {
+	supported: true, token: 1, gen: 'new',
+	current: { loaded: 1, version: '2026.08.30', type: 0, free: 0, app_count: 13422,
+	           size: 4823449, modified: 1758000000 },
+	online: { version: 'v4.0', announcement: '', count: 2, checked: 1758000000,
+		files: [
+			{ id: '1001', version: '2026.09.20', type: 0, free: 1, lang: 'cn',
+			  md5: '0123456789abcdef0123456789abcdef', count: 13560,
+			  desc: '新增 xxx 识别', date: '2026-09-20' },
+			{ id: '1002', version: '2026.06.01', type: 0, free: 1, lang: 'cn',
+			  md5: 'fedcba9876543210fedcba9876543210', count: 12980,
+			  desc: '常规更新', date: '2026-06-01' }
+		] },
+	update: { state: 'idle', stage: 'idle', status_code: 0, message: '', id: '',
+	          icons_skipped: 0, download_total: 0, download_now: 0, elapsed: 0 }
+};
+
+function sampleFeatures() { return FEATURES; }
 
 /* 先填满 60 个历史点，让曲线一打开就是满的 */
 for (var i = 0; i < MAXPOINTS; i++) {

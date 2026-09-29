@@ -2,10 +2,17 @@
 #
 # luci-app-netview -- rpcd backend
 #
-# Exposes ubus object "netview" with two methods:
-#   interfaces  -> per-interface realtime rx/tx rate + lifetime counters,
-#                  plus WAN addressing details and the connected-client count
-#   devices     -> per-LAN-client traffic aggregated from nf_conntrack
+# Exposes ubus object "netview" with these methods:
+#   interfaces      -> per-interface realtime rx/tx rate + lifetime counters,
+#                      plus WAN addressing details and the connected-client count
+#   devices         -> per-LAN-client traffic aggregated from nf_conntrack,
+#                      including a per-application breakdown when OAF is around
+#   sessions        -> connection table occupancy + remote-port breakdown
+#   features        -> OAF signature database version and the online catalogue
+#   feature_update  -> start an OAF signature download + install
+#
+# OAF is optional throughout: every method above answers without it, and the
+# ones that use it say which link in the chain is missing.
 #
 # Target: ImmortalWrt / OpenWrt 21.02 .. 24.10  (developed for 24.10 x86/64)
 #
@@ -20,8 +27,11 @@ TMP_IF="$WORKDIR/if.diff"
 TMP_RAW="$WORKDIR/dev.raw"
 TMP_DEV="$WORKDIR/dev.diff"
 TMP_PORT="$WORKDIR/svc.list"
-TMP_OAFMAP="$WORKDIR/oaf.map"
-TMP_OAFIDS="$WORKDIR/oaf.ids"
+TMP_APPMAP="$WORKDIR/oaf.apps"
+TMP_APPRAW="$WORKDIR/app.raw"
+TMP_APPFIN="$WORKDIR/app.fin"
+TMP_DEVF="$WORKDIR/dev.fin"
+TMP_FEAT="$WORKDIR/feat.list"
 
 mkdir -p "$WORKDIR"
 
@@ -260,80 +270,414 @@ top_list() {
 	'
 }
 
+# ---------------------------------------------------------- JSON snippets ---
+
+# Small readers for the JSON that oafd hands back. jshn can build output but
+# cannot search a parsed tree by key, and the two daemon generations wrap the
+# same payload in different envelopes, so the parsers below walk the quoted
+# tokens of each line instead of assuming a path. The two token shapes they
+# cope with are  "key":"value"  and  "key":value  (numbers, true/false).
+
+# A JSON string escapes its own quotes, which would otherwise end a token
+# early. Only \" is unescaped: it is the only escape these replies use.
+# (Defined once per awk program below via jv_unesc.)
+#
+# First string value stored under <key>, or nothing. The value sits two tokens
+# after the key -- the token in between is the colon, in "k":"v" and "k": "v".
+json_str() {
+	awk -v key="$1" '
+		{
+			gsub(/\r/, "")
+			n = split($0, t, "\"")
+			for (i = 1; i <= n; i++) {
+				if (want && i == want) { print jv_unesc(t[i]); exit }
+				if (t[i] == key && t[i + 1] ~ /^[ \t]*:[ \t]*$/) want = i + 2
+			}
+		}
+		function jv_unesc(s) { gsub(/\\"/, "\"", s); return s }
+	'
+}
+
+# "<key>\t<value>" for each key named in $1 (space separated), in the order
+# they appear. Empty values are kept: "message":"" is an answer, not a miss.
+json_flat() {
+	awk -v want="$1" '
+		BEGIN { n = split(want, w, " "); for (i = 1; i <= n; i++) keep[w[i]] = 1 }
+		{
+			gsub(/\r/, "")
+			c = split($0, t, "\"")
+			for (i = 1; i <= c; i++) {
+				if (!(t[i] in keep)) continue
+				v = jv_tok(t[i + 1], t[i + 2])
+				if (found) printf "%s\t%s\n", t[i], jv_unesc(v)
+			}
+		}
+		# A bare value is glued to the colon, and carries whatever structural
+		# punctuation follows the field. Only numbers and true/false take this
+		# path, so stripping every trailing brace / bracket / comma is safe:
+		# "1024}}" is 1024 at the end of a nested object.
+		function jv_tok(nx, qv,   v) {
+			found = 0
+			if (nx ~ /^[ \t]*:[ \t]*$/) { found = 1; return qv }
+			if (nx ~ /^[ \t]*:[ \t]*[^ \t]/) {
+				v = nx
+				sub(/^[ \t]*:[ \t]*/, "", v)
+				sub(/[][{},"]+[ \t]*$/, "", v)
+				found = 1
+				return v
+			}
+			return ""
+		}
+		function jv_unesc(s) { gsub(/\\"/, "\"", s); return s }
+	'
+}
+
+# One key out of json_flat output; empty when the key is absent.
+flat_get() {
+	printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1 == k { print $2; exit }'
+}
+
+# Truthy when the ubus request payload sets <key> to 1 / true. The payload is
+# small and wholly ours, so a literal test beats running a parser over it.
+req_flag() {
+	case "$1" in
+		*"\"$2\":1"*|*"\"$2\": 1"*|*"\"$2\":true"*|*"\"$2\": true"*) echo 1 ;;
+		*) echo 0 ;;
+	esac
+}
+
+# Keep only characters that are safe inside a JSON string. Feature ids, md5
+# sums and language tags are all [A-Za-z0-9._-]; dropping everything else also
+# means a crafted value cannot break out of the JSON that is handed to ubus.
+json_atom() {
+	printf '%s' "$1" | tr -cd 'A-Za-z0-9._-'
+}
+
+# jshn's json_add_int dies on a non-numeric argument, so anything read out of a
+# JSON blob goes through here first.
+num_or0() {
+	case "$1" in
+		''|*[!0-9-]*) echo 0 ;;
+		*) echo "$1" ;;
+	esac
+}
+
+# Size / mtime of a file, 0 when it is not there.
+f_size()  { num_or0 "$(stat -c %s "$1" 2>/dev/null)"; }
+f_mtime() { num_or0 "$(stat -c %Y "$1" 2>/dev/null)"; }
+
+# The ubus request payload. rpcd hands the method arguments over on stdin;
+# invoked by hand, or from the test harness, stdin is a terminal or already at
+# EOF and this yields nothing.
+oaf_req() {
+	local s
+	[ -t 0 ] && return 0
+	s=$(cat 2>/dev/null)
+	case "$s" in
+		*'{'*) printf '%s' "$s" ;;
+	esac
+}
+
 # --------------------------------------------------------- OAF (optional) ---
 
-# OpenAppFilter identifies applications with a kernel module (kmod-oaf) plus a
-# user-space daemon (appfilter). The daemon publishes its results on the ubus
-# object "appfilter"; the kernel module leaves /proc/sys/oaf behind.
+# OpenAppFilter = kernel module (kmod-oaf) + user-space daemon (appfilter).
+# oafd pushes its feature database into the kernel over netlink (id 29, magic
+# 0xa0b0c0d0); once DPI matches, the kernel stamps the connection's conntrack
+# mark with the application id:
 #
-# What OAF does *not* give, and it matters here: every field it reports is a
-# duration (first_time / latest_time), never a byte counter, and visit_info
-# carries no five-tuple to join back against conntrack. So the honest reading
-# of its data is "which apps are in use, on how many devices" -- not "which app
-# is eating the bandwidth". Everything below is written to degrade quietly: on
-# a router without OAF the caller falls back to port classification.
-OAF_PROC="/proc/sys/oaf"
-OAF_CFG="/tmp/feature.cfg"
+#     #define FWX_CT_APPID_MASK 0x0000FFFFU     // oaf/src/fwx_main.c
+#     fwx_ct_mark_update(ct, FWX_CT_APPID_MASK, app_id);
+#
+# That mark is the seam we need. /proc/net/nf_conntrack carries both "mark=" and
+# (with accounting on) "bytes=", so joining the two gives real per-application
+# byte counts -- which OAF's own ubus API cannot provide, since every field it
+# reports is a duration (first_time / latest_time), never a byte counter.
+#
+#   bytes    <- conntrack (needs nf_conntrack_acct=1)
+#   app_id   <- low 16 bits of the mark
+#   app name <- oafd's ubus class_list, the only place names exist: the kernel
+#               keeps app_id only (/proc/net/af_conn has no name column, nor does
+#               /proc/net/af_active_app), and the database itself
+#               (/etc/fwxd/feature.bin) is encrypted behind a CRC header.
+#
+# kmod-oaf on its own is NOT enough: with no oafd pushing the database the
+# kernel has nothing to match against.
+#
+# The module's own proc entries, all under /proc/net. An earlier revision probed
+# /proc/sys/oaf/enable, which oaf.ko never creates -- oaf_ready() was therefore
+# false on every real router. The test sandbox had been built to match that
+# mistake, so nothing caught it; the fake tree now mirrors the real node names.
+OAF_MOD_PROCS="/proc/net/af_active_app /proc/net/af_conn /proc/net/af_client"
+OAF_TTL=600
 
-# Usable right now? The module being loaded is not enough on its own -- oafd is
-# what answers ubus, and the feature database is what turns appids into names.
+# Two daemon generations are in the wild, with different object names *and*
+# different reply envelopes:
+#
+#   old  one ubus method per call, payload returned flat
+#        ubus call appfilter class_list
+#        -> {"class_list":[{"name":"视频","app_list":["1001,YouTube,1"]}]}
+#
+#   new  a single "common" router keyed by "api", payload wrapped in an
+#        envelope (2000 = ok, 4000 = error)
+#        ubus call fwx common '{"CopyRight":"…","api":"class_list","data":{}}'
+#        -> {"code":2000,"data":{"class_list":[…]},"CopyRight":"…"}
+#
+# The newer router validates CopyRight for class_list only, and answers an
+# error without it, so the field goes into every request. Nothing below assumes
+# an envelope: replies are parsed by walking their quoted tokens, which is why
+# one set of parsers covers both generations.
+OAF_OBJ_NEW="fwx"
+OAF_OBJ_OLD="appfilter"
+OAF_COPYRIGHT="www.fanchmwrt.com"
+
+# Where the signature database and its update channel keep their state.
+OAF_FEATURE_FILE="/etc/fwxd/feature.bin"
+OAF_FEATURE_LIST="/etc/fwxd/feature_list.json"
+OAF_TOKEN_UCI="fwx.global.feature_token"
+
+# Has oaf.ko been loaded?
+oaf_mod() {
+	local p
+	for p in $OAF_MOD_PROCS; do
+		[ -e "$p" ] && return 0
+	done
+	return 1
+}
+
+# Which daemon generation is answering? new / old / none
+#
+# Not memoised on purpose: the answer has to change as soon as the user
+# installs or removes OAF, and each probe is one local ubus query.
+oaf_gen() {
+	if ubus -v list "$OAF_OBJ_NEW" 2>/dev/null | grep -q '"common"'; then
+		echo new
+	elif ubus -v list "$OAF_OBJ_OLD" 2>/dev/null | grep -q '"class_list"'; then
+		echo old
+	else
+		echo none
+	fi
+}
+
+# Module loaded *and* daemon answering. Deliberately does not test
+# /tmp/feature.cfg: nothing in the OAF tree ever writes that file (the
+# kernel-side load_feature_buf_from_file is dead code, never called), so
+# requiring it would make this permanently false.
 oaf_ready() {
-	[ -r "$OAF_PROC/enable" ] || return 1
-	[ -r "$OAF_CFG" ] || return 1
+	oaf_mod || return 1
 	command -v ubus >/dev/null 2>&1 || return 1
-	ubus -v list appfilter >/dev/null 2>&1 || return 1
+	[ "$(oaf_gen)" != "none" ] || return 1
 	return 0
 }
 
-# appid -> "<category>\t<app name>" out of OAF's feature database.
-#
-# The file is plain text, one application per line under a class banner:
-#   #class 视频
-#   1001 YouTube:[tcp;;443;youtube.com;;]
-#   1002 抖音:[tcp;;443;douyin.com;;]
-# which means the id->name->category mapping needs no ubus round-trip at all.
-oaf_app_map() {
-	local cfg="$1"
-	[ -r "$cfg" ] || return 0
-	awk -F: '
-		/^#class/ {
-			cls = $0
-			sub(/^#class[ \t]+/, "", cls)
-			sub(/[ \t\r]+$/, "", cls)
-			next
-		}
-		/^[ \t]*#/ { next }
-		{
-			n = split($1, a, /[ \t]+/)
-			if (n >= 2 && a[1] ~ /^[0-9]+$/) printf "%s\t%s\t%s\n", a[1], cls, a[2]
-		}
-	' "$cfg"
+# Call one OAF API. Prints the raw JSON reply, or nothing when the installed
+# generation does not have that API -- the old one has no update APIs at all.
+oaf_api() {
+	local api="$1" data="{}"
+	[ -n "${2:-}" ] && data="$2"
+	if [ "$(oaf_gen)" = "old" ]; then
+		ubus call "$OAF_OBJ_OLD" "$api" '{}' 2>/dev/null
+	else
+		ubus call "$OAF_OBJ_NEW" common \
+			"{\"CopyRight\":\"$OAF_COPYRIGHT\",\"api\":\"$api\",\"data\":$data}" 2>/dev/null
+	fi
 }
 
-# "<category>\t<count>" from OAF's visit records.
+# Fetch appid -> "<class>\t<name>" and write the cache.
 #
-# visit_info holds one entry per app per device, so counting pairs gives "this
-# category is in use on N devices" -- which is the closest thing to a traffic
-# breakdown OAF can offer.
-oaf_classes() {
-	local cfg="$1" ids
-	oaf_app_map "$cfg" > "$TMP_OAFMAP"
-	[ -s "$TMP_OAFMAP" ] || return 0
+# class_list replies, in both generations:
+#   {"class_list":[{"name":"视频","app_list":["1001,YouTube,1"]}, ...]}
+# The trailing icon flag is present in some builds, absent in others.
+oaf_map_fetch() {
+	local json
+	json=$(oaf_api class_list)
+	[ -n "$json" ] || return 1
 
-	# ubus prints the reply as JSON, and appid is the only field needed.
-	# Flattening first keeps this independent of key order and nesting.
-	ids=$(ubus call appfilter dev_visit_list 2>/dev/null \
-		| tr -d ' \t\r\n' \
-		| sed 's/"appid":/\n&/g' \
-		| sed -n 's/^"appid":\([0-9][0-9]*\).*/\1/p')
-	[ -n "$ids" ] || return 0
+	printf '%s\n' "$json" | awk -v now="$(date +%s)" '
+		BEGIN { printf "%s\n", now }
+		{
+			gsub(/\r/, "")
+			n = split($0, t, "\"")
+			for (i = 1; i <= n; i++) {
+				s = t[i]
+				# "name" appears only on classes: an application is a bare
+				# string "1001,YouTube,1" with no "name" key of its own.
+				# The value sits two tokens on -- the token in between is the
+				# colon, in both "name":"x" and "name": "x".
+				if (s == "name" && t[i + 1] ~ /^[ \t]*:/) { want = i + 2; continue }
+				if (i == want) { cls = s; want = 0; continue }
+				if (s ~ /^[0-9]+,/) {
+					k = index(s, ",")
+					id = substr(s, 1, k - 1)
+					nm = substr(s, k + 1)
+					sub(/,[01]$/, "", nm)      # drop the trailing icon flag
+					if (id != "" && nm != "")
+						printf "%s\t%s\t%s\n", id, cls, nm
+				}
+			}
+		}
+	' > "$TMP_APPMAP.tmp" 2>/dev/null
 
-	printf '%s\n' "$ids" > "$TMP_OAFIDS"
-	awk -F'\t' '
-		NR == FNR { cls[$1] = $2; next }
-		{ c = cls[$1]; if (c != "") n[c]++ }
-		END { for (k in n) printf "%s\t%d\n", k, n[k] }
-	' "$TMP_OAFMAP" "$TMP_OAFIDS" | top_list 5
+	# A failed parse leaves just the timestamp line behind; keep the old cache.
+	if [ "$(wc -l < "$TMP_APPMAP.tmp")" -gt 1 ]; then
+		mv -f "$TMP_APPMAP.tmp" "$TMP_APPMAP"
+	else
+		rm -f "$TMP_APPMAP.tmp"
+		return 1
+	fi
+	return 0
+}
+
+# The online catalogue -> one line per entry:
+#   id \t version \t type \t free \t count \t date \t md5 \t desc
+#
+# oafd's normalizer emits each entry as a flat object led by its id, so a new
+# id ends the previous record -- that is the rule that actually does the work,
+# because a compact reply glues the closing brace to the value before it. A
+# standalone "}" also closes one, which keeps a plain {"a":"b"} shape working.
+# Entries with no id are dropped, matching what the daemon itself keeps.
+# desc is last because it is the only free-text field.
+feat_files() {
+	awk '
+		BEGIN { n = split("id version type free count date md5 desc", w, " "); for (i = 1; i <= n; i++) keep[w[i]] = 1 }
+		{
+			gsub(/\r/, "")
+			c = split($0, t, "\"")
+			for (i = 1; i <= c; i++) {
+				if (t[i] == "}") { emit(); clear(); continue }
+				if (!(t[i] in keep)) continue
+				v = jv_tok(t[i + 1], t[i + 2])
+				if (!found) continue
+				if (t[i] == "id") { emit(); clear() }
+				val[t[i]] = jv_unesc(v)
+				if (t[i] == "id") id = val["id"]
+			}
+		}
+		END { emit() }
+		function emit() {
+			if (id == "") return
+			printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", id, val["version"], val["type"], \
+			       val["free"], val["count"], val["date"], val["md5"], val["desc"]
+		}
+		function clear(  k) { for (k in val) delete val[k]; id = "" }
+		function jv_tok(nx, qv,   v) {
+			found = 0
+			if (nx ~ /^[ \t]*:[ \t]*$/) { found = 1; return qv }
+			if (nx ~ /^[ \t]*:[ \t]*[^ \t]/) {
+				v = nx
+				sub(/^[ \t]*:[ \t]*/, "", v)
+				sub(/[][{},"]+[ \t]*$/, "", v)
+				found = 1
+				return v
+			}
+			return ""
+		}
+		function jv_unesc(s) { gsub(/\\"/, "\"", s); return s }
+	'
+}
+
+# Refresh the cache when stale. Line 1 holds the build time; a 10 minute TTL
+# keeps this off the 3-second poll the UI runs at.
+oaf_appmap() {
+	local now stamp
+	now=$(date +%s)
+
+	if [ -s "$TMP_APPMAP" ] && [ "$(wc -l < "$TMP_APPMAP")" -gt 1 ]; then
+		stamp=$(sed -n '1p' "$TMP_APPMAP")
+		case "$stamp" in '' | *[!0-9]*) stamp=0 ;; esac
+		[ $((now - stamp)) -lt "$OAF_TTL" ] && return 0
+	fi
+
+	oaf_ready || return 0
+	oaf_map_fetch || return 0
+}
+
+# "<ip>\t<appid>\t<up>\t<down>" for every connection OAF has identified.
+#
+# Same direction rule as the device ranking: the original tuple starts at the
+# client, so for a forwarded inbound connection the byte counters swap sides.
+ct_apps() {
+	awk '
+	function ispriv(ip) {
+		if (ip ~ /^192\.168\./) return 1
+		if (ip ~ /^10\./) return 1
+		if (ip ~ /^172\.(1[6-9]|2[0-9]|3[01])\./) return 1
+		return 0
+	}
+	function hx(s,   i, c, d, r) {
+		sub(/^0x/, "", s)
+		r = 0
+		for (i = 1; i <= length(s); i++) {
+			d = index("0123456789abcdef", tolower(substr(s, i, 1))) - 1
+			if (d < 0) break
+			r = r * 16 + d
+		}
+		return r
+	}
+	/^ipv6/ { next }
+	/src=/ {
+		s1 = ""; d1 = ""; b1 = 0; b2 = 0; n = 0; m = 0; mk = -1
+		for (i = 1; i <= NF; i++) {
+			v = $i
+			if (v ~ /^src=/) { n++; if (n == 1) s1 = substr(v, 5) }
+			else if (v ~ /^dst=/) { if (n == 1) d1 = substr(v, 5) }
+			else if (v ~ /^bytes=/) {
+				m++
+				t = substr(v, 7) + 0
+				if (m == 1) b1 = t
+				else if (m == 2) b2 = t
+			}
+			else if (v ~ /^mark=/ && mk < 0) {
+				t = substr(v, 6)
+				mk = (t ~ /^0x/) ? hx(t) : t + 0
+			}
+		}
+		# Low 16 bits carry the app id; 0 means OAF has not classified this one.
+		app = mk % 65536
+		if (app <= 0) next
+		if (s1 != "" && ispriv(s1))      { u[s1 "\t" app] += b1; d[s1 "\t" app] += b2 }
+		else if (d1 != "" && ispriv(d1)) { u[d1 "\t" app] += b2; d[d1 "\t" app] += b1 }
+	}
+	END { for (k in u) printf "%s\t%d\t%d\n", k, u[k], d[k] }
+	' "$1"
+}
+
+# Swap app ids for names, then keep the top N per device by up+down.
+# Unknown ids fall back to "#<id>" so they surface instead of silently vanishing.
+app_join() {
+	awk -F'\t' -v top="${1:-3}" '
+		NR == FNR { if (FNR > 1) name[$1] = $3; next }
+		{
+			nm = ($2 in name) ? name[$2] : ("#" $2)
+			gsub(/[|:]/, " ", nm)
+			k = $1 "\t" nm
+			u[k] += $3
+			d[k] += $4
+		}
+		END {
+			for (k in u) {
+				split(k, a, "\t")
+				ip = a[1]
+				n = ++cnt[ip]
+				nmv[ip, n] = a[2]
+				uv[ip, n] = u[k]
+				dv[ip, n] = d[k]
+			}
+			for (ip in cnt) {
+				m = cnt[ip]
+				for (i = 1; i <= m; i++) o[i] = i
+				# selection sort: avoids depending on sort(1)
+				for (i = 1; i <= m; i++) {
+					bi = i
+					for (j = i + 1; j <= m; j++)
+						if (uv[ip, o[j]] + dv[ip, o[j]] > uv[ip, o[bi]] + dv[ip, o[bi]]) bi = j
+					t = o[i]; o[i] = o[bi]; o[bi] = t
+				}
+				lim = (m < top) ? m : top
+				for (i = 1; i <= lim; i++)
+					printf "%s\t%s\t%d\t%d\n", ip, nmv[ip, o[i]], uv[ip, o[i]], dv[ip, o[i]]
+			}
+		}
+	' "$TMP_APPMAP" "$TMP_APPRAW"
 }
 
 # ------------------------------------------------------------- interfaces ---
@@ -461,7 +805,7 @@ do_interfaces() {
 # ---------------------------------------------------------------- devices ---
 
 do_devices() {
-	local now leases ct
+	local now leases ct apps_state oldifs
 	now=$(date +%s)
 
 	leases="/tmp/dhcp.leases"
@@ -555,6 +899,28 @@ do_devices() {
 	}
 	' "$leases" "$ct" > "$TMP_RAW"
 
+	# Application breakdown, when OAF is around. Only connections the kernel has
+	# stamped with an app id contribute, so the per-app bytes will not add up to
+	# the device total -- the remainder is simply traffic nobody classified.
+	# apps_state carries the reason when there is nothing to show, so the page
+	# can say which link in the chain is missing instead of looking broken.
+	apps_state="ok"
+	: > "$TMP_APPRAW"
+	if ! oaf_ready; then
+		apps_state="no_oaf"
+	else
+		oaf_appmap
+		if [ ! -s "$TMP_APPMAP" ] || [ "$(wc -l < "$TMP_APPMAP")" -le 1 ]; then
+			apps_state="no_names"
+		else
+			ct_apps "$ct" > "$TMP_APPRAW"
+			[ -s "$TMP_APPRAW" ] || apps_state="no_mark"
+		fi
+	fi
+
+	: > "$TMP_APPFIN"
+	[ -s "$TMP_APPRAW" ] && app_join 3 > "$TMP_APPFIN"
+
 	# Rate = delta against the previous aggregate
 	awk -v now="$now" -v st="$STATE_DEV" '
 	BEGIN {
@@ -586,13 +952,32 @@ do_devices() {
 	}
 	' "$TMP_RAW" > "$TMP_DEV"
 
+	# Fold each device's app list onto its line as "name:up:down" joined by "|",
+	# so the JSON loop below stays a single pass over one file.
+	if [ -s "$TMP_APPFIN" ]; then
+		awk -F'\t' '
+			NR == FNR {
+				if ($1 != "") {
+					s = ($1 in acc) ? acc[$1] "|" : ""
+					acc[$1] = s $2 ":" $3 ":" $4
+				}
+				next
+			}
+			{ printf "%s\t%s\n", $0, ($1 in acc) ? acc[$1] : "" }
+		' "$TMP_APPFIN" "$TMP_DEV" > "$TMP_DEVF"
+	else
+		cp "$TMP_DEV" "$TMP_DEVF"
+	fi
+
 	{ echo "$now"; cat "$TMP_RAW"; } > "$STATE_DEV"
 
 	json_init
 	json_add_int "timestamp" "$now"
+	# Why the app column is empty, when it is: no_oaf / no_names / no_mark / ok
+	json_add_string "apps_state" "$apps_state"
 	json_add_array "devices"
 
-	while IFS="$(printf '\t')" read -r ip host up down dr ur conns; do
+	while IFS="$(printf '\t')" read -r ip host up down dr ur conns apps; do
 		[ -n "$ip" ] || continue
 		json_add_object
 		json_add_string "ip" "$ip"
@@ -602,10 +987,203 @@ do_devices() {
 		json_add_double "up_rate" "$ur"
 		json_add_double "down_rate" "$dr"
 		json_add_int    "conns" "$conns"
+		if [ -n "$apps" ]; then
+			json_add_array "apps"
+			oldifs="$IFS"
+			IFS="|"
+			for a in $apps; do
+				[ -n "$a" ] || continue
+				rest="${a#*:}"
+				json_add_object
+				json_add_string "name" "${a%%:*}"
+				json_add_int    "up"   "${rest%%:*}"
+				json_add_int    "down" "${rest#*:}"
+				json_close_object
+			done
+			IFS="$oldifs"
+			json_close_array
+		fi
 		json_close_object
-	done < "$TMP_DEV"
+	done < "$TMP_DEVF"
 
 	json_close_array
+	json_dump
+}
+
+# --------------------------------------------------------------- features ---
+
+# Read-only view of the OAF signature database and of the channel that updates
+# it. Everything comes from the daemon itself -- the database is encrypted
+# (magic + CRC header, FEATURE_HEADER_SIZE = 24 bytes) and is decrypted into
+# oafd's memory, so the only thing readable locally is the file's size and date.
+#
+#   get_feature_info                 version / app count of the loaded database
+#   get_feature_online_list          the catalogue. refresh=1 is the only call
+#                                    that touches the network; without it the
+#                                    daemon serves /etc/fwxd/feature_list.json,
+#                                    which is why the 3-second poll is safe
+#   get_feature_online_update_status progress of a running download
+#
+# Only the new generation has this triad. On the old one the page is told so
+# instead of being shown empty fields.
+feat_current() {
+	local flat="$1"
+	json_add_object "current"
+	json_add_int    "loaded"    "$(num_or0 "$(flat_get "$flat" loaded)")"
+	json_add_string "version"   "$(flat_get "$flat" version)"
+	json_add_int    "type"      "$(num_or0 "$(flat_get "$flat" type)")"
+	json_add_int    "free"      "$(num_or0 "$(flat_get "$flat" free)")"
+	json_add_int    "app_count" "$(num_or0 "$(flat_get "$flat" app_count)")"
+	json_add_int    "size"      "$(f_size  "$OAF_FEATURE_FILE")"
+	json_add_int    "modified"  "$(f_mtime "$OAF_FEATURE_FILE")"
+	json_close_object
+}
+
+# The update state, shared by `features` and `feature_update`. Fields the
+# daemon did not send read as 0 / empty rather than being omitted, so the page
+# never has to test for their presence.
+feat_update() {
+	local flat="$1" k v
+	json_add_object "update"
+	for k in state stage status_code message id icons_skipped download_total download_now elapsed; do
+		v=$(flat_get "$flat" "$k")
+		case "$k" in
+			state|stage|message|id) json_add_string "$k" "$v" ;;
+			*)                     json_add_int    "$k" "$(num_or0 "$v")" ;;
+		esac
+	done
+	json_close_object
+}
+
+do_features() {
+	local now req refresh gen flat list sflat lflat
+	now=$(date +%s)
+	req=$(oaf_req)
+	refresh=$(req_flag "$req" refresh)
+
+	json_init
+	json_add_int "timestamp" "$now"
+
+	gen=$(oaf_gen)
+	case "$gen" in
+		none)
+			# Either the module or the daemon is missing -- a state the
+			# device ranking also reports, under the same name.
+			json_add_boolean "supported" 0
+			json_add_string  "gen" "none"
+			json_add_string  "reason" "no_oaf"
+			json_dump
+			return
+			;;
+		old)
+			json_add_boolean "supported" 0
+			json_add_string  "gen" "old"
+			json_add_string  "reason" "no_online_api"
+			json_dump
+			return
+			;;
+	esac
+
+	json_add_boolean "supported" 1
+	json_add_string  "gen" "new"
+	# Only whether a token is stored, never the token: it is the only thing
+	# authenticating this router against the vendor's update server.
+	if [ -n "$(uci -q get "$OAF_TOKEN_UCI" 2>/dev/null)" ]; then
+		json_add_boolean "token" 1
+	else
+		json_add_boolean "token" 0
+	fi
+
+	flat=$(oaf_api get_feature_info)
+	feat_current "$(printf '%s' "$flat" | json_flat "loaded version type free app_count")"
+
+	# The catalogue. Only a user-triggered check asks for the network round
+	# trip, so a poll can never sit on a 2-minute HTTP timeout.
+	if [ "$refresh" = "1" ]; then
+		list=$(oaf_api get_feature_online_list '{"refresh":1,"lang":"cn"}')
+	else
+		list=$(oaf_api get_feature_online_list '{"refresh":0}')
+	fi
+
+	: > "$TMP_FEAT"
+	printf '%s' "$list" | feat_files > "$TMP_FEAT"
+
+	lflat=$(printf '%s' "$list" | json_flat count)
+	json_add_object "online"
+	json_add_string "version"      "$(printf '%s' "$list" | json_str version)"
+	json_add_string "announcement" "$(printf '%s' "$list" | json_str announcement)"
+	json_add_int    "count"        "$(num_or0 "$(flat_get "$lflat" count)")"
+	json_add_int    "checked"      "$(f_mtime "$OAF_FEATURE_LIST")"
+	json_add_array  "files"
+	while IFS="$(printf '\t')" read -r fid fver ftype ffree fcnt fdate fmd5 fdesc; do
+		[ -n "$fid" ] || continue
+		json_add_object
+		json_add_string "id"      "$fid"
+		json_add_string "version" "$fver"
+		json_add_int    "type"    "$(num_or0 "$ftype")"
+		json_add_int    "free"    "$(num_or0 "$ffree")"
+		json_add_int    "count"   "$(num_or0 "$fcnt")"
+		json_add_string "date"    "$fdate"
+		json_add_string "md5"     "$fmd5"
+		json_add_string "desc"    "$fdesc"
+		json_close_object
+	done < "$TMP_FEAT"
+	json_close_array
+	json_close_object
+
+	sflat=$(oaf_api get_feature_online_update_status)
+	feat_update "$(printf '%s' "$sflat" | json_flat "state stage status_code message id icons_skipped download_total download_now elapsed")"
+
+	json_dump
+}
+
+# Start a download + install, then report the state it landed in. Writes only
+# ever happen here, and only because the user clicked.
+do_feature_update() {
+	local req id md5 gen out flat
+	req=$(oaf_req)
+	id=$(json_atom "$(printf '%s' "$req" | json_str id)")
+	md5=$(json_atom "$(printf '%s' "$req" | json_str md5)")
+
+	json_init
+	json_add_int "timestamp" "$(date +%s)"
+
+	gen=$(oaf_gen)
+	if [ "$gen" != "new" ]; then
+		json_add_boolean "started" 0
+		json_add_string  "reason" "no_online_api"
+		json_dump
+		return
+	fi
+	if [ -z "$id" ]; then
+		json_add_boolean "started" 0
+		json_add_string  "reason" "no_id"
+		json_dump
+		return
+	fi
+
+	# md5 lets the daemon verify what it downloaded; only pass it when the
+	# catalogue actually carried one.
+	if [ -n "$md5" ]; then
+		out=$(oaf_api start_feature_online_update \
+			"{\"id\":\"$id\",\"lang\":\"cn\",\"md5\":\"$md5\"}")
+	else
+		out=$(oaf_api start_feature_online_update "{\"id\":\"$id\",\"lang\":\"cn\"}")
+	fi
+
+	# A refusal ("already running", "invalid file id") arrives as the envelope's
+	# error code plus a message and no state, so both are passed through.
+	flat=$(printf '%s' "$out" | json_flat "code status_code message")
+	if [ "$(flat_get "$flat" code)" = "2000" ]; then
+		json_add_boolean "started" 1
+	else
+		json_add_boolean "started" 0
+		json_add_string  "reason" "$(flat_get "$flat" message)"
+	fi
+
+	feat_update "$(printf '%s' "$out" | json_flat \
+		"state stage status_code message id icons_skipped download_total download_now elapsed")"
+
 	json_dump
 }
 
@@ -618,34 +1196,24 @@ do_devices() {
 # the port breakdown are available either way. Folding them together would make
 # the whole panel disappear on routers that disable acct to save memory.
 do_sessions() {
-	local now ct lim cc cm src
+	local now ct lim cc cm
 	now=$(date +%s)
 
 	lim=$(ct_limits)
 	cc="${lim%% *}"
 	cm="${lim##* }"
 
-	# OAF first when it is actually running: an app name beats a port number.
-	# Anything short of a populated answer falls through to the ports.
-	src="port"
-	: > "$TMP_PORT"
-	if oaf_ready; then
-		oaf_classes "$OAF_CFG" > "$TMP_PORT"
-		[ -s "$TMP_PORT" ] && src="oaf"
-	fi
-
-	if [ "$src" = "port" ]; then
-		ct="$CT_TABLE"
-		[ -r "$ct" ] || ct="$CT_TABLE_ALT"
-		ct_ports "$ct" > "$TMP_PORT"
-	fi
+	# Always the port breakdown. "Where did the connections go" is a different
+	# question from "which app used the bandwidth" -- the latter lives in the
+	# device ranking, built from the OAF conntrack marks.
+	ct="$CT_TABLE"
+	[ -r "$ct" ] || ct="$CT_TABLE_ALT"
+	ct_ports "$ct" > "$TMP_PORT"
 
 	json_init
 	json_add_int "timestamp" "$now"
 	json_add_int "count" "$cc"
 	json_add_int "max"   "$cm"
-	# Lets the UI label the breakdown for what it actually is.
-	json_add_string "source" "$src"
 	json_add_array "services"
 	while IFS="$(printf '\t')" read -r name n; do
 		[ -n "$name" ] || continue
@@ -662,14 +1230,18 @@ do_sessions() {
 
 case "$1" in
 	list)
-		echo '{ "interfaces": {}, "devices": {}, "sessions": {} }'
+		echo '{ "interfaces": {}, "devices": {}, "sessions": {},'
+		echo '  "features": { "refresh": "boolean" },'
+		echo '  "feature_update": { "id": "string", "md5": "string" } }'
 		;;
 	call)
 		case "$2" in
-			interfaces) do_interfaces ;;
-			devices)    do_devices ;;
-			sessions)   do_sessions ;;
-			*)          echo '{}' ;;
+			interfaces)     do_interfaces ;;
+			devices)        do_devices ;;
+			sessions)       do_sessions ;;
+			features)       do_features ;;
+			feature_update) do_feature_update ;;
+			*)              echo '{}' ;;
 		esac
 		;;
 	*)

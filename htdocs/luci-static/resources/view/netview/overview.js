@@ -47,7 +47,20 @@ var callSessions = rpc.declare({
 	method: 'sessions'
 });
 
+var callFeatures = rpc.declare({
+	object: 'netview',
+	method: 'features'
+});
+
+var callFeatureUpdate = rpc.declare({
+	object: 'netview',
+	method: 'feature_update',
+	params: [ 'id', 'md5' ],
+	expect: { started: false }
+});
+
 var POLL_INTERVAL = 3;
+var FEATURE_POLL = 30;      /* 特征库目录只在手动/每 30 秒才去问一次 oafd */
 var MAXPOINTS = 60;          /* 60 * 3 s = 3 minutes */
 var MAX_DEVICES = 20;
 
@@ -286,6 +299,17 @@ var CSS = [
 	'.nv-ifname { font-weight: 600; }',
 	'.nv-devname { font-weight: 600; }',
 	'.nv-devip { color: var(--nv-muted); font-variant-numeric: tabular-nums; }',
+	/* 应用明细挂在设备名下面：小一号、灰色，流量数字回正文字色,
+	 * 免得整行都在抢注意力。名字串太长就省略号收掉。 */
+	'.nv-devapps { display: flex; flex-wrap: wrap; gap: 3px 9px; margin-top: 3px;',
+	'              font-size: 11px; font-weight: 400; color: var(--nv-muted); }',
+	'.nv-devapps span { display: inline-flex; align-items: baseline; gap: 4px;',
+	'                   max-width: 100%; }',
+	'.nv-devapps em { font-style: normal; overflow: hidden; text-overflow: ellipsis;',
+	'                 white-space: nowrap; max-width: 108px; }',
+	'.nv-devapps b { font-weight: 600; color: var(--nv-text);',
+	'                font-variant-numeric: tabular-nums; }',
+	'.nv-apphint { text-align: center; }',
 
 	'.nv-badge { display: inline-block; margin-left: 7px; padding: 1px 7px;',
 	'            border-radius: 999px; font-size: 10px; font-weight: 600;',
@@ -312,7 +336,38 @@ var CSS = [
 	'            border: 1px dashed var(--nv-border); border-radius: var(--nv-radius); }',
 	'.nv-hint { display: block; margin-top: 8px; font-size: 11.5px; }',
 	'.nv-empty code { padding: 1px 6px; border-radius: 4px; font-size: 12px;',
-	'                 background: var(--nv-bg); color: var(--nv-text); }'
+	'                 background: var(--nv-bg); color: var(--nv-text); }',
+
+	/* ---- 特征库卡片 ---- */
+	'.nv-feat { padding: 14px 16px; background: var(--nv-card);',
+	'           border: 1px solid var(--nv-border); border-radius: var(--nv-radius); }',
+	'.nv-feat-hd { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;',
+	'             margin-bottom: 10px; }',
+	'.nv-feat-hd b { font-size: 13px; }',
+	'.nv-feat-ver { color: var(--nv-up); font-weight: 600;',
+	'              font-variant-numeric: tabular-nums; }',
+	'.nv-feat-meta { color: var(--nv-muted); font-size: 11.5px; }',
+	'.nv-feat-row { display: flex; align-items: center; gap: 10px; padding: 8px 2px;',
+	'               border-top: 1px solid var(--nv-border); }',
+	'.nv-feat-row:first-of-type { border-top: none; }',
+	'.nv-feat-info { flex: 1; min-width: 0; }',
+	'.nv-feat-info b { font-size: 12px; }',
+	'.nv-feat-info span { display: block; color: var(--nv-muted); font-size: 11px;',
+	'                      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+	'.nv-feat-btn { flex: none; padding: 4px 12px; border: 1px solid var(--nv-border);',
+	'               border-radius: 6px; background: var(--nv-bg); color: var(--nv-text);',
+	'               font-size: 11.5px; cursor: pointer; }',
+	'.nv-feat-btn:hover { border-color: var(--nv-up); color: var(--nv-up); }',
+	'.nv-feat-btn[disabled] { opacity: .5; cursor: not-allowed; }',
+	'.nv-feat-status { margin-top: 10px; padding: 8px 10px; border-radius: 6px;',
+	'                  font-size: 11.5px; background: var(--nv-bg); }',
+	'.nv-feat-status.running { color: #d97706; }',
+	'.nv-feat-status.done { color: #16a34a; }',
+	'.nv-feat-status.failed { color: #dc2626; }',
+	'.nv-feat-bar { height: 4px; border-radius: 2px; background: var(--nv-border);',
+	'               margin-top: 6px; overflow: hidden; }',
+	'.nv-feat-bar i { display: block; height: 100%; background: var(--nv-up);',
+	'                transition: width .3s ease; }'
 ].join('\n');
 
 /* ------------------------------------------------------------------ icons --- */
@@ -574,11 +629,9 @@ function svcColor(name, i) {
 
 /* 连接概况：连接跟踪表的实时占用 + 这些连接都连去了哪儿。
  *
- * 归类数据有两个来源，后端挑一个给：
- *   source = 'oaf'  → OpenAppFilter 的应用分类（真的应用名）
- *   source = 'port' → 远程端口归类（没装 OAF 时的兜底）
- * OAF 只上报时长、不上报字节（见后端说明），所以这里的占比单位是"连接数"
- * 或"使用的设备数"，不是流量 —— 副标题会明说当前是哪种，免得误读。 */
+ * 这里只做端口归类 —— 回答的是"连接都去了哪些服务端口"，与"哪个应用吃了
+ * 多少带宽"是两个问题，后者在设备排行那一列（靠 OAF 打在 conntrack 上的
+ * 应用标记算出来）。占比单位是连接数，不是流量。 */
 function connHtml(s) {
 	if (!s)
 		return '<div class="nv-conn-hd"><b>连接概况</b>' +
@@ -590,7 +643,6 @@ function connHtml(s) {
 
 	var cnt = Number(s.count) || 0;
 	var max = Number(s.max) || 0;
-	var oaf = s.source === 'oaf';
 	var svcs = (Array.isArray(s.services) ? s.services : []).filter(function(x) {
 		return x && x.name && Number(x.count) > 0;
 	});
@@ -612,8 +664,7 @@ function connHtml(s) {
 	var lvl = pct >= 85 ? '#dc2626' : (pct >= 60 ? '#d97706' : '#16a34a');
 
 	var html = '<div class="nv-conn-hd"><b>连接概况</b><span>' +
-		(oaf ? 'OAF 应用分类 · 按使用设备数占比'
-		     : 'conntrack 实时占用 · 按远程端口归类') +
+		'conntrack 实时占用 · 按远程端口归类' +
 		'</span></div><div class="nv-conn-body">';
 
 	html += '<div class="nv-gauge">' +
@@ -632,8 +683,7 @@ function connHtml(s) {
 			'</div><div class="nv-keys">' + keys + '</div></div>';
 	else
 		html += '<div class="nv-dist"><div class="nv-gauge-s">' +
-			(oaf ? 'OAF 已启用，但还没有应用识别记录'
-			     : '暂时没有可归类的连接') +
+			'暂时没有可归类的连接' +
 			'</div></div>';
 
 	return html + '</div>';
@@ -782,6 +832,36 @@ function ifTableHtml(d) {
 
 /* ------------------------------------------------------------ device table --- */
 
+/* 每台设备用到的应用及其流量。
+ *
+ * 数据来自内核给 conntrack 打的应用标记 + 连接字节数，所以这是真实字节，
+ * 不是 OAF 自己 ubus 接口里的访问时长。只有被识别出来的连接才计入，
+ * 各项相加小于设备总量是正常的 —— 差额就是没认出来的流量，不硬凑。 */
+function appsHtml(d) {
+	var apps = Array.isArray(d.apps) ? d.apps : [];
+	if (!apps.length)
+		return '';
+
+	var parts = apps.map(function(a) {
+		var down = Number(a.down) || 0;
+		var up = Number(a.up) || 0;
+		return '<span title="' + esc(a.name + '　下行 ' + fmtBytes(down) +
+			'　上行 ' + fmtBytes(up)) + '">' +
+			'<em>' + esc(a.name) + '</em>' +
+			'<b>' + fmtBytes(down + up) + '</b></span>';
+	});
+
+	return '<div class="nv-devapps">' + parts.join('') + '</div>';
+}
+
+/* 看不到应用时说明卡在哪一环，而不是让那一列莫名其妙地空着。 */
+var APP_STATE_HINT = {
+	no_oaf:   '装上 OAF（kmod-oaf 内核模块 + appfilter 守护进程）后，' +
+	          '每台设备下面会列出它用到的应用与流量',
+	no_names: 'OAF 在运行，但读不到它的特征库，暂时无法把应用编号换成名字',
+	no_mark:  'OAF 已就绪，但还没有连接被识别出来 —— 有点流量经过后就会出现'
+};
+
 function renderDevices(box, data) {
 	if (!data) {
 		box.innerHTML = '<div class="nv-empty">无法读取设备数据</div>';
@@ -828,7 +908,10 @@ function renderDevices(box, data) {
 		var pct = Math.max(3, Math.min(100, (total / max) * 100));
 
 		html += '<tr>' +
-			'<td class="nv-devname">' + esc(d.host && d.host !== '-' ? d.host : '未知设备') + '</td>' +
+			'<td class="nv-devname">' +
+				esc(d.host && d.host !== '-' ? d.host : '未知设备') +
+				appsHtml(d) +
+			'</td>' +
 			'<td class="nv-devip">' + esc(d.ip) + '</td>' +
 			'<td class="nv-num nv-dn nv-r">' + fmtRate(d.down_rate) + '</td>' +
 			'<td class="nv-num nv-up nv-r">' + fmtRate(d.up_rate) + '</td>' +
@@ -840,7 +923,97 @@ function renderDevices(box, data) {
 		'</tr>';
 	});
 
-	box.innerHTML = html + '</tbody></table>';
+	var hint = APP_STATE_HINT[data.apps_state];
+	box.innerHTML = html + '</tbody></table>' +
+		(hint ? '<div class="nv-hint nv-apphint">' + hint + '</div>' : '');
+}
+
+/* ------------------------------------------------------ feature library --- */
+
+/* OAF 特征库卡片。特征库是加密的（magic + CRC 头），本地只能读到大小和时间，
+ * 版本 / 应用数 / 在线目录全来自 oafd 的 ubus 接口。只有新架构（fwx）有在线
+ * 更新这一整套，老架构（appfilter）直接说"不支持"。 */
+function featHtml(f) {
+	if (!f)
+		return '<div class="nv-empty">无法读取 OAF 特征库信息</div>';
+
+	/* 老架构 / 没装 OAF：如实说明，不画空壳。 */
+	if (f.supported !== true && f.supported !== 1) {
+		var why = {
+			no_oaf:        '没有检测到 OAF（kmod-oaf + oafd 都没就绪），无法做应用识别',
+			no_online_api: '当前 OAF 是旧架构（appfilter），不带在线更新接口'
+		}[f.reason] || '当前环境不支持特征库在线更新';
+		return '<div class="nv-empty">' + esc(why) + '</div>';
+	}
+
+	var cur = f.current || {};
+	var up = f.update || {};
+	var files = Array.isArray(f.online && f.online.files) ? f.online.files : [];
+
+	var hd = '<div class="nv-feat-hd">' +
+		'<b>应用特征库</b>' +
+		'<span class="nv-feat-ver">' + esc(cur.version || '未知版本') + '</span>' +
+		'<span class="nv-feat-meta">' +
+			(Number(cur.app_count) > 0 ? fmtInt(cur.app_count) + ' 个应用' : '未加载') +
+			(f.token === true || f.token === 1 ? ' · 已授权' : '') +
+		'</span></div>';
+
+	if (!files.length) {
+		return '<div class="nv-feat">' + hd +
+			'<div class="nv-feat-meta">在线目录为空 —— 稍后或点刷新重试</div>' +
+			featStatus(up) + '</div>';
+	}
+
+	var rows = files.map(function(x) {
+		var desc = x.desc || '';
+		return '<div class="nv-feat-row">' +
+			'<div class="nv-feat-info">' +
+				'<b>' + esc(x.version || '') + '</b>' +
+				'<span>' + esc(desc) + '　' +
+					(fmtInt(x.count) !== '0' ? fmtInt(x.count) + ' 应用 · ' : '') +
+					esc(x.date || '') + '</span>' +
+			'</div>' +
+			'<button class="nv-feat-btn" data-fid="' + esc(x.id || '') + '"' +
+				' data-fmd5="' + esc(x.md5 || '') + '">更新</button>' +
+		'</div>';
+	}).join('');
+
+	return '<div class="nv-feat">' + hd + rows + featStatus(up) + '</div>';
+}
+
+/* 下载 / 安装状态条。oafd 用 state/stage 两个字段 + 一个百分比友好的
+ * download_now/download_total 表达进度。 */
+function featStatus(up) {
+	up = up || {};
+	var state = up.state || 'idle';
+	var pct = 0;
+
+	if (Number(up.download_total) > 0)
+		pct = Math.min(100, Number(up.download_now) * 100 / Number(up.download_total));
+
+	var cls = 'nv-feat-status';
+	var txt = '';
+
+	if (state === 'idle' || state === '' || state === 'idle') {
+		return '';
+	}
+
+	if (up.message) {
+		txt = esc(up.message);
+		cls += ' failed';
+	}
+	else if (up.stage) {
+		txt = '正在' + esc(up.stage) + '…' +
+			(pct > 0 ? ' ' + pct.toFixed(0) + '%' : '');
+		cls += ' running';
+	}
+	else {
+		txt = '更新进行中';
+		cls += ' running';
+	}
+
+	var bar = pct > 0 ? '<div class="nv-feat-bar"><i style="width:' + pct + '%"></i></div>' : '';
+	return '<div class="' + cls + '">' + txt + bar + '</div>';
 }
 
 /* ------------------------------------------------------------------- view --- */
@@ -869,6 +1042,7 @@ return view.extend({
 		var connBox = E('div', { 'class': 'nv-card nv-conn' });
 		var ifBox = E('div', { 'class': 'nv-tablewrap' });
 		var devBox = E('div', { 'class': 'nv-tablewrap' });
+		var featBox = E('div', { 'class': 'nv-featwrap' });
 
 		var legend = E('div', { 'class': 'nv-legend' });
 		legend.innerHTML =
@@ -912,6 +1086,13 @@ return view.extend({
 					E('span', {}, '按当前存活连接的累计字节排序，最多 ' + MAX_DEVICES + ' 条')
 				]),
 				devBox
+			]),
+			E('div', { 'class': 'nv-sec' }, [
+				E('div', { 'class': 'nv-sec-hd' }, [
+					E('h3', {}, '应用识别'),
+					E('span', {}, '特征库由 OAF（kmod-oaf + oafd）提供，用于把设备上的应用编号换成名字')
+				]),
+				featBox
 			])
 		]);
 
@@ -954,8 +1135,40 @@ return view.extend({
 			});
 		}
 
+		/* 特征库单独拉，节奏慢得多（在线目录只有手动/网络刷新才联网，轮询
+		 * 只读本地缓存）。它和 3 秒主轮询解耦，避免把 oafd 拖进高频 ubus。 */
+		var featPending = false;
+		function refreshFeatures() {
+			if (featPending) return;
+			featPending = true;
+			return callFeatures().catch(function() { return null; }).then(function(f) {
+				featBox.innerHTML = featHtml(f);
+			}).finally(function() {
+				featPending = false;
+			});
+		}
+
+		/* 更新按钮走事件委托：卡片内容每 30 秒会被 innerHTML 整个换掉，
+		 * 逐个绑 click 会随着重绘失效。 */
+		featBox.addEventListener('click', function(ev) {
+			var btn = ev.target;
+			while (btn && btn !== featBox && !(btn.getAttribute && btn.getAttribute('data-fid')))
+				btn = btn.parentNode;
+			if (!btn || btn === featBox) return;
+
+			var id = btn.getAttribute('data-fid');
+			var md5 = btn.getAttribute('data-fmd5') || '';
+			if (!id) return;
+
+			btn.setAttribute('disabled', 'disabled');
+			callFeatureUpdate({ id: id, md5: md5 }).catch(function() { return null; })
+				.then(function() { return refreshFeatures(); });
+		});
+
 		refresh();
+		refreshFeatures();
 		poll.add(refresh, POLL_INTERVAL);
+		poll.add(refreshFeatures, FEATURE_POLL);
 		/* LuCI's built-in poll only self-starts once its ticker exists, while
 		 * the standalone poll.js older releases shipped never auto-started at
 		 * all. Calling start() explicitly is idempotent and covers both. */

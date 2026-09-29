@@ -16,7 +16,8 @@ src = src.replace('return view.extend(', 'view.extend(');
 
 const EXPORT = '\n;return { sideHtml, ifTableHtml, connHtml, svcColor, chartSvg,' +
 	' sparkSvg, aggregate, renderDevices, fmtBytes, fmtRate, fmtDuration, fmtProto,' +
-	' fmtSpeed, fmtInt, CSS, truthy, niceMax, smoothPath };\n';
+	' fmtSpeed, fmtInt, CSS, truthy, niceMax, smoothPath, appsHtml, APP_STATE_HINT,' +
+	' featHtml, featStatus };\n';
 
 const viewStub = { extend: (o) => o };
 const rpcStub  = { declare: () => () => Promise.resolve(null) };
@@ -280,6 +281,31 @@ check('null 数据不抛错', b.innerHTML.length > 0);
 b = box(); API.renderDevices(b, { devices: [{ ip: '10.0.0.1', host: '', down: 0, up: 0, down_rate: 0, up_rate: 0, conns: 0 }] });
 check('空 host 不泄漏 undefined', dirty(b.innerHTML) === null, dirty(b.innerHTML));
 
+b = box(); API.renderDevices(b, {
+	apps_state: 'ok',
+	devices: [
+		{ ip: '192.168.9.101', host: 'phone', down: 8192, up: 2048, down_rate: 0, up_rate: 0, conns: 4,
+		  apps: [ { name: 'YouTube', up: 1024, down: 7168 },
+		          { name: '抖音',    up: 512,  down: 512 } ] }
+	]
+});
+check('设备行里带出应用名', b.innerHTML.includes('YouTube') && b.innerHTML.includes('抖音'));
+check('识别正常时不插提示条', !b.innerHTML.includes('nv-apphint'));
+check('无 NaN/undefined 泄漏', dirty(b.innerHTML) === null, dirty(b.innerHTML));
+
+b = box(); API.renderDevices(b, {
+	apps_state: 'no_oaf',
+	devices: [{ ip: '192.168.9.101', host: 'phone', down: 1, up: 1, down_rate: 0, up_rate: 0, conns: 1 }]
+});
+check('没装 OAF 时说明原因', b.innerHTML.includes('nv-apphint') && b.innerHTML.includes('kmod-oaf'));
+check('没装 OAF 时不画空应用行', !b.innerHTML.includes('nv-devapps'));
+
+b = box(); API.renderDevices(b, {
+	apps_state: 'no_mark',
+	devices: [{ ip: '192.168.9.101', host: 'phone', down: 1, up: 1, down_rate: 0, up_rate: 0, conns: 1 }]
+});
+check('OAF 就绪但还没识别到流量时另有说法', b.innerHTML.includes('还没有连接被识别'));
+
 /* ----------------------------------------------------- 7. formatting --- */
 
 console.log('\n=== formatting ===');
@@ -421,10 +447,11 @@ check('暗色块不重复定义数据色（应沿用 .nv-root 上的同一组）
 
 console.log('\n=== 连接概况 ===');
 
-/* 两副面孔：装了 OAF 给应用分类，否则给端口归类。占比口径不同（连接数 /
- * 使用设备数），所以副标题必须跟着 source 变 —— 看错单位就会误读成流量。 */
+/* 连接概况现在只做端口归类。应用维度搬去了设备排行 —— 那里能拿到真实
+ * 字节数（conntrack 的 mark 给出 app_id，bytes= 给出流量），比端口更接近
+ * "谁在用网"。这里的占比口径仍然是连接数。 */
 const SESS_PORT = {
-	count: 3412, max: 65536, source: 'port',
+	count: 3412, max: 65536,
 	services: [
 		{ name: 'HTTPS', count: 1820 },
 		{ name: 'QUIC',  count: 640 },
@@ -433,18 +460,9 @@ const SESS_PORT = {
 	]
 };
 
-const SESS_OAF = {
-	count: 3412, max: 65536, source: 'oaf',
-	services: [
-		{ name: '视频', count: 9 },
-		{ name: '游戏', count: 5 },
-		{ name: '其他', count: 6 }
-	]
-};
-
 let connOut = API.connHtml(SESS_PORT);
-check('端口模式给出占用/上限', connOut.includes('3,412') && connOut.includes('65,536'));
-check('端口模式列出服务名', connOut.includes('HTTPS') && connOut.includes('QUIC'));
+check('给出占用与上限', connOut.includes('3,412') && connOut.includes('65,536'));
+check('列出服务名', connOut.includes('HTTPS') && connOut.includes('QUIC'));
 check('副标题说明是端口归类', connOut.includes('按远程端口归类'));
 check('无 NaN/undefined 泄漏', dirty(connOut) === null, dirty(connOut));
 check('堆叠段宽度之和为 100%', (function() {
@@ -452,12 +470,6 @@ check('堆叠段宽度之和为 100%', (function() {
 	const ws = [...connOut.matchAll(/width:([\d.]+)%/g)].map((m) => parseFloat(m[1])).slice(1);
 	return ws.length >= 3 && Math.abs(ws.reduce((a, b) => a + b, 0) - 100) < 0.05;
 })(), connOut);
-
-connOut = API.connHtml(SESS_OAF);
-check('OAF 模式副标题改为应用分类', connOut.includes('OAF 应用分类'));
-check('OAF 模式列出分类名', connOut.includes('视频') && connOut.includes('游戏'));
-check('OAF 模式不退化成端口名', !/HTTPS|QUIC/.test(connOut));
-check('无 NaN/undefined 泄漏', dirty(connOut) === null, dirty(connOut));
 
 check('缺数据时给提示而不是崩', API.connHtml(null).includes('连接跟踪不可用'));
 check('没有可归类项时走空态',
@@ -467,6 +479,56 @@ check('max=0 不画比例条也不出现 NaN', (function() {
 	return !h.includes('NaN') && h.includes('读不到连接表上限');
 })());
 check('count 缺失按 0 处理', API.connHtml({ max: 100 }).includes('>0<i>'));
+
+/* 应用明细：内核给 conntrack 打的 mark 给出 app_id，bytes= 给出真实流量。
+ * 只有被识别出来的连接才计入，所以这些数字加起来小于设备总量是正常的。 */
+const DEV_APPS = [
+	{ name: 'YouTube', up: 1024, down: 7168 },
+	{ name: '抖音',    up: 512,  down: 512 }
+];
+const appOut = API.appsHtml({ apps: DEV_APPS });
+check('列出应用名', appOut.includes('YouTube') && appOut.includes('抖音'));
+check('每项给出上下行之和',
+	appOut.includes(API.fmtBytes(8192)) && appOut.includes(API.fmtBytes(1024)));
+check('悬浮说明带上下行明细',
+	appOut.includes('title=') && appOut.includes('下行') && appOut.includes('上行'));
+check('没有应用时不渲染空壳',
+	API.appsHtml({ apps: [] }) === '' && API.appsHtml({}) === '');
+check('apps 为 null 不崩', API.appsHtml({ apps: null }) === '');
+check('应用名做 HTML 转义',
+	API.appsHtml({ apps: [{ name: '<img src=x>', up: 1, down: 1 }] }).indexOf('<img') === -1);
+check('无 NaN/undefined 泄漏', dirty(appOut) === null, dirty(appOut));
+check('三种缺失状态都有文案', !!(API.APP_STATE_HINT.no_oaf &&
+	API.APP_STATE_HINT.no_names && API.APP_STATE_HINT.no_mark));
+
+/* 特征库卡片：只有新架构（fwx）有在线更新，老架构/没装 OAF 要如实说明。 */
+check('features 无数据不崩', API.featHtml(null).includes('无法读取'));
+check('老架构给出 no_online_api 文案',
+	API.featHtml({ supported: false, reason: 'no_online_api' }).includes('旧架构'));
+check('没装 OAF 给出 no_oaf 文案',
+	API.featHtml({ supported: false, reason: 'no_oaf' }).includes('kmod-oaf'));
+const featOut = API.featHtml({
+	supported: true, token: 1,
+	current: { version: '2026.08.30', app_count: 13422 },
+	online: { files: [
+		{ id: '1001', version: '2026.09.20', count: 13560, date: '2026-09-20', md5: 'ab', desc: '新增 xxx 识别' }
+	] },
+	update: { state: 'idle' }
+});
+check('特征库版本与应用数', featOut.includes('2026.08.30') && featOut.includes('13,422'));
+check('已授权徽标', featOut.includes('已授权'));
+check('在线文件带更新按钮与 id', featOut.includes('data-fid="1001"') && featOut.includes('更新'));
+check('idle 状态不画状态条', featOut.indexOf('nv-feat-status') === -1);
+check('无 NaN/undefined 泄漏', dirty(featOut) === null, dirty(featOut));
+
+const featRun = API.featStatus({ state: 'running', stage: '下载', download_now: 30, download_total: 100 });
+check('下载中给进度', featRun.includes('下载') && featRun.includes('30%'));
+check('进度条宽度', featRun.includes('width:30%'));
+check('失败态带 message', API.featStatus({ state: 'running', message: 'invalid file id' }).includes('invalid file id'));
+check('空 update 不画条', API.featStatus({}) === '');
+check('file id 做 HTML 转义',
+	API.featHtml({ supported: true, current: {}, online: { files: [{ id: '"x"><img', version: '', md5: '' }] }, update: {} })
+		.indexOf('<img') === -1);
 
 check('低占用用绿', API.connHtml({ count: 10, max: 100 }).includes('#16a34a'));
 check('过 60% 转琥珀', API.connHtml({ count: 70, max: 100 }).includes('#d97706'));
