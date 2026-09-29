@@ -635,7 +635,7 @@ alias_sid() { printf 'alias_%s' "$(printf '%s' "$1" | tr '.' '_')"; }
 
 # stdin {"ip":"...","name":"..."} -> {"ok":0|1,"action":"set"|"clear"}
 do_set_alias() {
-	local json ip name sid action
+	local json ip name sid action rc uci_err
 	json=$(rpc_req)
 	ip=$(printf '%s' "$json" | json_str ip | tr -cd '0-9.')
 	name=$(printf '%s' "$json" | json_str name | tr -d '"\\' | cut -c 1-64)
@@ -659,24 +659,28 @@ do_set_alias() {
 	fi
 
 	sid=$(alias_sid "$ip")
+	rc=0
+	uci_err=""
 	if [ -n "$name" ]; then
-		uci -q set "netview.$sid=alias" &&
-			uci -q set "netview.$sid.ip=$ip" &&
-			uci -q set "netview.$sid.name=$name" &&
-			uci -q commit netview
+		uci_err=$(uci -q set "netview.$sid=alias" 2>&1 &&
+			uci -q set "netview.$sid.ip=$ip" 2>&1 &&
+			uci -q set "netview.$sid.name=$name" 2>&1 &&
+			uci -q commit netview 2>&1)
+		rc=$?
 		action="set"
 	else
-		uci -q delete "netview.$sid"
-		uci -q commit netview
+		uci_err=$(uci -q delete "netview.$sid" 2>&1; uci -q commit netview 2>&1)
+		rc=$?
 		action="clear"
 	fi
 
-	if [ $? -eq 0 ] || [ "$action" = "clear" ]; then
+	if [ "$rc" -eq 0 ]; then
 		json_add_boolean "ok" 1
 		json_add_string  "action" "$action"
 	else
 		json_add_boolean "ok" 0
 		json_add_string  "reason" "uci_failed"
+		json_add_string  "detail" "${uci_err:-uci 命令失败（未知原因）}"
 	fi
 	json_dump
 }

@@ -1029,9 +1029,11 @@ return view.extend({
 				el.setAttribute('disabled', 'disabled');
 				callSetAlias(ip2, name).then(function(res) {
 					if (res && res.ok === false) {
-						alert('保存失败：' + (res.reason === 'bad_ip' ? 'IP 地址无效' :
-							res.reason === 'no_uci' ? '路由器缺少 uci' :
-							res.reason === 'uci_failed' ? '写入配置失败' : res.reason));
+						var why = res.reason === 'bad_ip' ? 'IP 地址无效' :
+							res.reason === 'no_uci' ? '路由器缺少 uci 命令' :
+							res.reason === 'uci_failed' ? '写入配置失败：' + (res.detail || '') :
+							res.reason;
+						alert('保存失败：' + why);
 						if (inp2) { el.removeAttribute('disabled'); inp2.focus(); return; }
 					}
 					devEditing = false;
