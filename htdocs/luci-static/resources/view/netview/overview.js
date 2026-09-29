@@ -1,78 +1,3 @@
-'use strict';
-'require view';
-'require rpc';
-'require poll';
-
-/*
- * luci-app-netview -- realtime traffic overview
- *
- * Layout (modelled on the iStoreOS QuickStart page):
- *
- *   +---------------------------------------+----------------------+
- *   | 流量统计   [download][upload]   now:  |  已连接互联网          |
- *   |                                       |  N 已连接设备          |
- *   |        large gradient area chart      |  IP 地址 / DNS        |
- *   |                                       |  网络接口状态 (tiles)  |
- *   +---------------------------------------+----------------------+
- *   | 网络接口 -- per-interface rate + sparkline + lifetime counters |
- *   | 设备流量排行 -- LAN clients ranked by aggregated conntrack bytes|
- *
- * The hero chart aggregates all WAN-role interfaces (falling back to every
- * interface when no WAN could be identified), so "traffic" here means what
- * actually crosses the uplink.
- *
- * History lives in memory only: MAXPOINTS samples, i.e. ~3 minutes at a 3
- * second poll interval.
- *
- * Styling is self-contained: every colour resolves through a --nv-* custom
- * property declared on .nv-root, whose default is itself var(--oc-*, <light
- * value>). Argon (and any theme that defines --oc-surface / --oc-text / ...)
- * therefore still drives surfaces and text, while the iStoreOS-inspired
- * fallbacks keep the page looking right on themes that define nothing.
- * A prefers-color-scheme block swaps the fallbacks for dark values.
- */
-
-var callInterfaces = rpc.declare({
-	object: 'netview',
-	method: 'interfaces'
-});
-
-var callDevices = rpc.declare({
-	object: 'netview',
-	method: 'devices'
-});
-
-var callSessions = rpc.declare({
-	object: 'netview',
-	method: 'sessions'
-});
-
-var callFeatures = rpc.declare({
-	object: 'netview',
-	method: 'features'
-});
-
-/* LuCI 的 rpc.declare 按位置映射 params，所以这些调用都是位置传参。 */
-var callFeatureUpdate = rpc.declare({
-	object: 'netview',
-	method: 'feature_update',
-	params: [ 'id', 'md5' ],
-	expect: { started: false }
-});
-
-var callFeatureUpload = rpc.declare({
-	object: 'netview',
-	method: 'feature_upload',
-	params: [ 'chunk', 'seq' ],
-	expect: { ok: false }
-});
-
-var callFeatureInstall = rpc.declare({
-	object: 'netview',
-	method: 'feature_install',
-	expect: { installed: false }
-});
-
 var callSetAlias = rpc.declare({
 	object: 'netview',
 	method: 'set_alias',
@@ -81,14 +6,9 @@ var callSetAlias = rpc.declare({
 });
 
 var POLL_INTERVAL = 3;
-var FEATURE_POLL = 30;      /* 特征库目录只在手动/每 30 秒才去问一次 oafd */
 var MAXPOINTS = 60;          /* 60 * 3 s = 3 minutes */
 var MAX_DEVICES = 20;
 
-/* uhttpd 的 ubus POST 上限 64 KiB，base64 膨胀 4/3 —— 每块带 24KB 二进制，
- * 编码后 32KB，给 JSON-RPC 信封留足一半余量。 */
-var UPLOAD_CHUNK = 24 * 1024;
-var ICON_BASE = '/luci-static/resources/app_icons/';
 
 /* iStoreOS-inspired data colours. Deliberately fixed rather than derived from
  * the theme accent: they identify the two series across light and dark. */
@@ -337,18 +257,6 @@ var CSS = [
 	'.nv-edit-input { width: 130px; padding: 2px 6px; font-size: 12px;',
 	'                 border: 1px solid var(--nv-up); border-radius: 5px;',
 	'                 background: var(--nv-card); color: var(--nv-text); }',
-	/* 应用明细挂在设备名下面：小一号、灰色，流量数字回正文字色,
-	 * 免得整行都在抢注意力。名字串太长就省略号收掉。 */
-	'.nv-devapps { display: flex; flex-wrap: wrap; gap: 3px 9px; margin-top: 3px;',
-	'              font-size: 11px; font-weight: 400; color: var(--nv-muted); }',
-	'.nv-devapps span { display: inline-flex; align-items: baseline; gap: 4px;',
-	'                   max-width: 100%; }',
-	'.nv-devapps em { font-style: normal; overflow: hidden; text-overflow: ellipsis;',
-	'                 white-space: nowrap; max-width: 108px; }',
-	'.nv-devapps b { font-weight: 600; color: var(--nv-text);',
-	'                font-variant-numeric: tabular-nums; }',
-	'.nv-apphint { text-align: center; }',
-
 	'.nv-badge { display: inline-block; margin-left: 7px; padding: 1px 7px;',
 	'            border-radius: 999px; font-size: 10px; font-weight: 600;',
 	'            letter-spacing: .03em; vertical-align: 1px;',
@@ -376,36 +284,11 @@ var CSS = [
 	'.nv-empty code { padding: 1px 6px; border-radius: 4px; font-size: 12px;',
 	'                 background: var(--nv-bg); color: var(--nv-text); }',
 
-	/* ---- 特征库卡片 ---- */
-	'.nv-feat { padding: 14px 16px; background: var(--nv-card);',
-	'           border: 1px solid var(--nv-border); border-radius: var(--nv-radius); }',
-	'.nv-feat-hd { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;',
-	'             margin-bottom: 10px; }',
-	'.nv-feat-hd b { font-size: 13px; }',
-	'.nv-feat-ver { color: var(--nv-up); font-weight: 600;',
-	'              font-variant-numeric: tabular-nums; }',
-	'.nv-feat-meta { color: var(--nv-muted); font-size: 11.5px; }',
-	'.nv-feat-row { display: flex; align-items: center; gap: 10px; padding: 8px 2px;',
-	'               border-top: 1px solid var(--nv-border); }',
-	'.nv-feat-row:first-of-type { border-top: none; }',
-	'.nv-feat-info { flex: 1; min-width: 0; }',
-	'.nv-feat-info b { font-size: 12px; }',
-	'.nv-feat-info span { display: block; color: var(--nv-muted); font-size: 11px;',
-	'                      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
-	'.nv-feat-btn { flex: none; padding: 4px 12px; border: 1px solid var(--nv-border);',
-	'               border-radius: 6px; background: var(--nv-bg); color: var(--nv-text);',
-	'               font-size: 11.5px; cursor: pointer; }',
-	'.nv-feat-btn:hover { border-color: var(--nv-up); color: var(--nv-up); }',
-	'.nv-feat-btn[disabled] { opacity: .5; cursor: not-allowed; }',
-	'.nv-feat-status { margin-top: 10px; padding: 8px 10px; border-radius: 6px;',
-	'                  font-size: 11.5px; background: var(--nv-bg); }',
-	'.nv-feat-status.running { color: #d97706; }',
-	'.nv-feat-status.done { color: #16a34a; }',
-	'.nv-feat-status.failed { color: #dc2626; }',
-	'.nv-feat-bar { height: 4px; border-radius: 2px; background: var(--nv-border);',
-	'               margin-top: 6px; overflow: hidden; }',
-	'.nv-feat-bar i { display: block; height: 100%; background: var(--nv-up);',
-	'                transition: width .3s ease; }'
+	'.nv-btn { flex: none; padding: 4px 12px; border: 1px solid var(--nv-border);',
+	'           border-radius: 6px; background: var(--nv-bg); color: var(--nv-text);',
+	'           font-size: 11.5px; cursor: pointer; }',
+	'.nv-btn:hover { border-color: var(--nv-up); color: var(--nv-up); }',
+	'.nv-btn[disabled] { opacity: .5; cursor: not-allowed; }',
 ].join('\n');
 
 /* ------------------------------------------------------------------ icons --- */
@@ -668,7 +551,7 @@ function svcColor(name, i) {
 /* 连接概况：连接跟踪表的实时占用 + 这些连接都连去了哪儿。
  *
  * 这里只做端口归类 —— 回答的是"连接都去了哪些服务端口"，与"哪个应用吃了
- * 多少带宽"是两个问题，后者在设备排行那一列（靠 OAF 打在 conntrack 上的
+ * 多少带宽"是两个问题，后者需要应用级识别（本页当前按端口归类）
  * 应用标记算出来）。占比单位是连接数，不是流量。 */
 function connHtml(s) {
 	if (!s)
@@ -870,44 +753,6 @@ function ifTableHtml(d) {
 
 /* ------------------------------------------------------------ device table --- */
 
-/* 每台设备用到的应用及其流量。
- *
- * 数据来自内核给 conntrack 打的应用标记 + 连接字节数，所以这是真实字节，
- * 不是 OAF 自己 ubus 接口里的访问时长。只有被识别出来的连接才计入，
- * 各项相加小于设备总量是正常的 —— 差额就是没认出来的流量，不硬凑。 */
-function appsHtml(d) {
-	var apps = Array.isArray(d.apps) ? d.apps : [];
-	if (!apps.length)
-		return '';
-
-	var parts = apps.map(function(a) {
-		var down = Number(a.down) || 0;
-		var up = Number(a.up) || 0;
-		/* 厂商特征包带 <appid>.png 图标。两级回退：先落到 default.png，
-		 * 连它也没有就把 <img> 折叠掉，永远不显示裂图。 */
-		var icon = /^[0-9]+$/.test(String(a.id))
-			? '<img src="' + ICON_BASE + esc(a.id) + '.png" alt="" data-f="0"' +
-			  ' onerror="if(!this.dataset.f){this.dataset.f=1;this.src=\'' +
-			  ICON_BASE + 'default.png\'}else{this.style.display=\'none\'}">'
-			: '';
-		return '<span title="' + esc(a.name + '　下行 ' + fmtBytes(down) +
-			'　上行 ' + fmtBytes(up)) + '">' +
-			icon +
-			'<em>' + esc(a.name) + '</em>' +
-			'<b>' + fmtBytes(down + up) + '</b></span>';
-	});
-
-	return '<div class="nv-devapps">' + parts.join('') + '</div>';
-}
-
-/* 看不到应用时说明卡在哪一环，而不是让那一列莫名其妙地空着。 */
-var APP_STATE_HINT = {
-	no_oaf:   '装上 OAF（kmod-oaf 内核模块 + appfilter 守护进程）后，' +
-	          '每台设备下面会列出它用到的应用与流量',
-	no_names: 'OAF 在运行，但读不到它的特征库，暂时无法把应用编号换成名字',
-	no_mark:  'OAF 已就绪，但还没有连接被识别出来 —— 有点流量经过后就会出现'
-};
-
 function renderDevices(box, data) {
 	if (!data) {
 		box.innerHTML = '<div class="nv-empty">无法读取设备数据</div>';
@@ -963,7 +808,6 @@ function renderDevices(box, data) {
 				(alias ? '<span class="nv-alias-badge" title="手动备注">备注</span>' : '') +
 				'<button class="nv-edit" data-role="dev-edit" data-ip="' + esc(d.ip) + '"' +
 					' data-cur="' + (named ? esc(d.host) : '') + '" title="编辑设备备注">✎</button>' +
-				appsHtml(d) +
 			'</td>' +
 			'<td class="nv-devip">' + esc(d.ip) + '</td>' +
 			'<td class="nv-devmac">' + (d.mac && d.mac !== '-' ? esc(d.mac) : '—') + '</td>' +
@@ -977,295 +821,7 @@ function renderDevices(box, data) {
 		'</tr>';
 	});
 
-	var hint = APP_STATE_HINT[data.apps_state];
-	box.innerHTML = html + '</tbody></table>' +
-		(hint ? '<div class="nv-hint nv-apphint">' + hint + '</div>' : '');
-}
-
-/* ------------------------------------------------------ feature library --- */
-
-/* OAF 特征库卡片。
- *
- * 新架构（fwx）：特征库是加密的（magic + CRC 头），版本 / 应用数 / 在线目录
- * 全来自 oafd 的 ubus 接口，走在线更新。
- * 旧架构（appfilter）：特征库是明文 feature.cfg，没有在线接口 —— 但厂商的
- * 免费特征包（openappfilter.com 的 zip）正是为它准备的：tar 包里一个
- * feature.cfg + app_icons/ 目录。这里照厂商 LuCI 的同一套配方做本地上传。 */
-function featHtml(f) {
-	if (!f)
-		return '<div class="nv-empty">无法读取 OAF 特征库信息</div>';
-
-	/* 老架构但支持本地上传：显示当前特征库 + 上传控件。 */
-	if (f.local_upload === true || f.local_upload === 1) {
-		var loc = f.local || {};
-		return '<div class="nv-feat">' +
-			'<div class="nv-feat-hd">' +
-				'<b>应用特征库</b>' +
-				'<span class="nv-feat-ver">' +
-					esc(loc.version || '未知版本') + '</span>' +
-				'<span class="nv-feat-meta">' +
-					(Number(loc.app_count) > 0
-						? fmtInt(loc.app_count) + ' 个应用 · ' : '') +
-					'特征格式 ' + esc(loc.format || '未知') + ' · 旧架构走本地上传' +
-				'</span></div>' +
-			'<div class="nv-feat-row">' +
-				'<div class="nv-feat-info">' +
-					'<b>本地上传更新</b>' +
-					'<span>从 openappfilter.com 下载特征包后直接选择上传' +
-					'（zip 或 .bin 均可，无需解压），要求 v3.0 格式</span>' +
-				'</div>' +
-				'<input type="file" class="nv-feat-file" data-role="feat-file"' +
-					' accept=".zip,.tgz,.gz,.bin" style="display:none">' +
-				'<button class="nv-feat-btn" data-role="feat-pick">选择文件…</button>' +
-			'</div>' +
-			'<div data-role="feat-confirmbar"></div>' +
-			'<div data-role="feat-upstate"></div>' +
-			featDiag(f.diag) +
-			featStatus(f.update) +
-			'</div>';
-	}
-
-	/* 没装 OAF：如实说明，不画空壳。 */
-	if (f.supported !== true && f.supported !== 1) {
-		var why = {
-			no_oaf: '没有检测到 OAF（kmod-oaf + oafd 都没就绪），无法做应用识别'
-		}[f.reason] || '当前环境不支持特征库更新';
-		return '<div class="nv-empty">' + esc(why) + '</div>';
-	}
-
-	var cur = f.current || {};
-	var up = f.update || {};
-	var files = Array.isArray(f.online && f.online.files) ? f.online.files : [];
-
-	var hd = '<div class="nv-feat-hd">' +
-		'<b>应用特征库</b>' +
-		'<span class="nv-feat-ver">' + esc(cur.version || '未知版本') + '</span>' +
-		'<span class="nv-feat-meta">' +
-			(Number(cur.app_count) > 0 ? fmtInt(cur.app_count) + ' 个应用' : '未加载') +
-			(f.token === true || f.token === 1 ? ' · 已授权' : '') +
-		'</span></div>';
-
-	if (!files.length) {
-		return '<div class="nv-feat">' + hd +
-			'<div class="nv-feat-meta">在线目录为空 —— 稍后或点刷新重试</div>' +
-			featStatus(up) + '</div>';
-	}
-
-	var rows = files.map(function(x) {
-		var desc = x.desc || '';
-		return '<div class="nv-feat-row">' +
-			'<div class="nv-feat-info">' +
-				'<b>' + esc(x.version || '') + '</b>' +
-				'<span>' + esc(desc) + '　' +
-					(fmtInt(x.count) !== '0' ? fmtInt(x.count) + ' 应用 · ' : '') +
-					esc(x.date || '') + '</span>' +
-			'</div>' +
-			'<button class="nv-feat-btn" data-fid="' + esc(x.id || '') + '"' +
-				' data-fmd5="' + esc(x.md5 || '') + '">更新</button>' +
-		'</div>';
-	}).join('');
-
-	return '<div class="nv-feat">' + hd + rows + featStatus(up) + '</div>';
-}
-
-/* 识别链路自检：应用列为什么是空的，一行说清楚。
- * 内核 DPI 只在入口网卡名包含 lan_ifname、且处于网关模式时才给 conntrack
- * 打应用标记 —— 这两项不对，特征库再新也认不出任何东西。 */
-function featDiag(d) {
-	if (!d) return '';
-	var flows = Number(d.flows) || 0, marked = Number(d.marked) || 0;
-	var parts = [
-		'连接 ' + fmtInt(flows) + ' 条，已识别 ' + fmtInt(marked) + ' 条'
-	];
-	if (d.lan_ifname) parts.push('lan_ifname=' + esc(d.lan_ifname));
-	if (d.work_mode !== '' && d.work_mode != null)
-		parts.push('work_mode=' + esc(d.work_mode) +
-			(String(d.work_mode) === '0' ? '（网关）' : '（旁路）'));
-
-	var tip = '';
-	if (flows > 0 && marked === 0)
-		tip = '<br>内核还没给任何连接打应用标记：检查 lan_ifname 是否为你的 LAN 网桥名' +
-		      '（通常是 br-lan），并确认 OAF 已在「服务 → 应用过滤」中启用';
-
-	return '<div class="nv-feat-meta" data-role="feat-diag" style="margin-top:8px">' +
-		'识别自检：' + parts.join(' · ') + tip + '</div>';
-}
-
-/* 上传前的确认条：显示文件信息，用户点了确认才真正开始传输。 */
-function featConfirm(file, curVer) {
-	return '<div class="nv-feat-status running" data-role="feat-confirm">' +
-		'准备上传 <b>' + esc(file.name) + '</b>（' + fmtBytes(file.size) +
-		'），将替换当前特征库' +
-		(curVer ? '（当前 ' + esc(curVer) + '，原文件备份为 .bak）' : '') +
-		'。<div class="nv-feat-bar"><i style="width:0%"></i></div>' +
-		'<div style="margin-top:6px">' +
-			'<button class="nv-feat-btn" data-role="feat-go">确认上传</button> ' +
-			'<button class="nv-feat-btn" data-role="feat-cancel">取消</button>' +
-		'</div></div>';
-}
-
-/* 本地上传的阶段性反馈。kind: progress / installing / done / failed */
-function featUploadState(kind, a, b) {
-	var cls = 'nv-feat-status';
-	var txt = '';
-	var bar = '';
-
-	if (kind === 'progress') {
-		var pct = Math.min(100, a * 100 / b);
-		txt = '上传中 ' + pct.toFixed(0) + '%（' + fmtBytes(a) + ' / ' +
-			fmtBytes(b) + '）';
-		cls += ' running';
-		bar = '<div class="nv-feat-bar"><i style="width:' + pct + '%"></i></div>';
-	}
-	else if (kind === 'installing') {
-		txt = '上传完成，正在解包安装…';
-		cls += ' running';
-		bar = '<div class="nv-feat-bar"><i style="width:100%"></i></div>';
-	}
-	else if (kind === 'done') {
-		var r = a || {};
-		txt = '✔ 已更新到 ' + (r.version || '?') + '，' +
-			fmtInt(r.app_count) + ' 个应用';
-		if (Number(r.icons) > 0)
-			txt += '，图标 ' + fmtInt(r.icons) + ' 张';
-		txt += Number(r.reload) === 1 ? '，oafd 已热重载' :
-		       Number(r.reload) === 2 ? '，服务已重启' :
-		       '（oafd 未在运行，装好了，下次启动生效）';
-		cls += ' done';
-	}
-	else { /* failed */
-		var why = {
-			no_upload:      '还没有上传文件',
-			too_large:      '文件超过 20MB 上限',
-			decode_failed:  '上传数据损坏，请重试',
-			extract_failed: '解压失败 —— 这个文件不是特征库压缩包',
-			no_feature_cfg: '压缩包里没有 feature.cfg',
-			no_version:     'feature.cfg 缺少 #version 标记',
-			bad_format:     '特征格式不是 v3.0（包内格式：' + (b || '未知') + '）',
-			write_failed:   '写入 /etc/appfilter 失败，检查存储空间'
-		}[a] || (a || '安装失败');
-		txt = '✘ 特征库更新失败：' + why;
-		cls += ' failed';
-	}
-
-	return '<div class="' + cls + '">' + txt + bar + '</div>';
-}
-
-/* 把一个 File 按块 base64 传给 feature_upload，然后触发 feature_install。
- * 全程 Promise 链（文件切片读取是异步的，且块必须按序到达）。
- * 每块最多重试 2 次 —— 一次 rpc 抖动不该让整次上传前功尽弃。 */
-function uploadFeatureFile(file, stateEl, onDone) {
-	function b64OfBlob(blob) {
-		return new Promise(function(resolve, reject) {
-			var r = new FileReader();
-			r.onload = function() {
-				var s = String(r.result);
-				resolve(s.slice(s.indexOf(',') + 1));
-			};
-			r.onerror = function() { reject(r.error || new Error('read failed')); };
-			r.readAsDataURL(blob);
-		});
-	}
-
-	function sendChunk(b64, seq, tries) {
-		return callFeatureUpload(b64, seq).catch(function(err) {
-			if (tries < 2) {
-				return new Promise(function(res) {
-					setTimeout(res, 500 * (tries + 1));
-				}).then(function() { return sendChunk(b64, seq, tries + 1); });
-			}
-			throw err;
-		}).then(function(res) {
-			if (res && res.ok === false)
-				throw { upload: true, reason: res.reason || 'decode_failed' };
-			return res;
-		});
-	}
-
-	var nchunks = Math.ceil(file.size / UPLOAD_CHUNK);
-	var chain = Promise.resolve();
-
-	for (var i = 0; i < nchunks; i++) (function(i) {
-		chain = chain.then(function() {
-			var end = Math.min((i + 1) * UPLOAD_CHUNK, file.size);
-			return b64OfBlob(file.slice(i * UPLOAD_CHUNK, end)).then(function(b64) {
-				return sendChunk(b64, i, 0);
-			}).then(function() {
-				stateEl.innerHTML = featUploadState('progress', end, file.size);
-			});
-		});
-	})(i);
-
-	chain.then(function() {
-		stateEl.innerHTML = featUploadState('installing');
-		return callFeatureInstall();
-	}).then(function(res) {
-		if (res && res.installed === true) {
-			stateEl.innerHTML = featUploadState('done', res);
-		}
-		else {
-			stateEl.innerHTML =
-				featUploadState('failed', res && res.reason, res && res.format);
-		}
-	}).catch(function(err) {
-		var msg;
-		if (err && err.upload) {
-			msg = err.reason;
-		}
-		else {
-			/* 把 LuCI rpc 的真实错误透出来，别再笼统地说"中断" */
-			var raw = String((err && err.message) || err || '');
-			if (/access denied|permission/i.test(raw))
-				msg = '会话没有上传权限（Access denied）—— 请退出 LuCI 重新登录后再试。' +
-				      '新版本新增的接口只对重新登录后的会话生效';
-			else if (/timed? ?out/i.test(raw))
-				msg = '请求超时（' + raw + '），请重试';
-			else if (/not found/i.test(raw))
-				msg = '后端没有这个接口（' + raw + '）—— 执行 /etc/init.d/rpcd reload 后重新登录';
-			else
-				msg = '上传中断：' + (raw || '未知错误');
-		}
-		stateEl.innerHTML = featUploadState('failed', msg);
-	}).finally(function() {
-		/* 无论成败都要复位轮询开关并刷新一次 —— 否则一次失败会让卡片
-		 * 从此不再刷新，旧的失败红条就一直挂着误导人。 */
-		if (onDone) onDone();
-	});
-}
-
-/* 下载 / 安装状态条。oafd 用 state/stage 两个字段 + 一个百分比友好的
- * download_now/download_total 表达进度。 */
-function featStatus(up) {
-	up = up || {};
-	var state = up.state || 'idle';
-	var pct = 0;
-
-	if (Number(up.download_total) > 0)
-		pct = Math.min(100, Number(up.download_now) * 100 / Number(up.download_total));
-
-	var cls = 'nv-feat-status';
-	var txt = '';
-
-	if (state === 'idle' || state === '' || state === 'idle') {
-		return '';
-	}
-
-	if (up.message) {
-		txt = esc(up.message);
-		cls += ' failed';
-	}
-	else if (up.stage) {
-		txt = '正在' + esc(up.stage) + '…' +
-			(pct > 0 ? ' ' + pct.toFixed(0) + '%' : '');
-		cls += ' running';
-	}
-	else {
-		txt = '更新进行中';
-		cls += ' running';
-	}
-
-	var bar = pct > 0 ? '<div class="nv-feat-bar"><i style="width:' + pct + '%"></i></div>' : '';
-	return '<div class="' + cls + '">' + txt + bar + '</div>';
+	box.innerHTML = html + '</tbody></table>';
 }
 
 /* ------------------------------------------------------------------- view --- */
@@ -1294,7 +850,6 @@ return view.extend({
 		var connBox = E('div', { 'class': 'nv-card nv-conn' });
 		var ifBox = E('div', { 'class': 'nv-tablewrap' });
 		var devBox = E('div', { 'class': 'nv-tablewrap' });
-		var featBox = E('div', { 'class': 'nv-featwrap' });
 
 		var legend = E('div', { 'class': 'nv-legend' });
 		legend.innerHTML =
@@ -1339,13 +894,6 @@ return view.extend({
 				]),
 				devBox
 			]),
-			E('div', { 'class': 'nv-sec' }, [
-				E('div', { 'class': 'nv-sec-hd' }, [
-					E('h3', {}, '应用识别'),
-					E('span', {}, '特征库由 OAF（kmod-oaf + oafd）提供，用于把设备上的应用编号换成名字')
-				]),
-				featBox
-			])
 		]);
 
 		function refresh() {
@@ -1383,117 +931,12 @@ return view.extend({
 
 				/* 独立于接口数据：conntrack 读不到也不该把整列拖黑 */
 				connBox.innerHTML = connHtml(res[2]);
-				renderDevices(devBox, res[1]);
+				/* 编辑备注期间不重绘设备表 —— 否则 3 秒轮询会把输入框还原 */
+				if (!devEditing) renderDevices(devBox, res[1]);
 			});
 		}
 
-		/* 上传期间暂停特征库自动刷新，免得卡片在进度显示中途被重绘。 */
-		var uploadActive = false;
-		var featPending = false;
-		function refreshFeatures() {
-			if (featPending || uploadActive) return;
-			featPending = true;
-			return callFeatures().catch(function() { return null; }).then(function(f) {
-				featBox.innerHTML = featHtml(f);
-				/* 确认条要显示"将替换当前 vX"；新旧两种数据形状都取一下 */
-				if (f) {
-					curFeatVer = (f.local && f.local.version) ||
-					             (f.current && f.current.version) || '';
-				}
-			}).finally(function() {
-				featPending = false;
-			});
-		}
-
-		/* 更新按钮与文件选择都走事件委托：卡片内容每 30 秒会被 innerHTML
-		 * 整个换掉，逐个绑监听会随着重绘失效。 */
-		var pendingFile = null;   /* 选好了、等用户点确认的文件 */
-		var curFeatVer = '';      /* 确认条里显示"将替换 vX"用 */
-
-		featBox.addEventListener('click', function(ev) {
-			var el = ev.target;
-			while (el && el !== featBox && !(el.getAttribute && el.getAttribute('data-role')))
-				el = el.parentNode;
-			if (!el || el === featBox) return;
-			var role = el.getAttribute('data-role');
-
-			if (role === 'feat-pick') {
-				var inp = featBox.querySelector('input[data-role="feat-file"]');
-				if (inp) inp.click();
-				return;
-			}
-
-			/* 确认条：点了"确认上传"才真正开始传输。 */
-			if (role === 'feat-go' && pendingFile) {
-				var state = featBox.querySelector('[data-role="feat-upstate"]');
-				var file = pendingFile;
-				pendingFile = null;
-				if (!state) return;
-				uploadActive = true;
-				uploadFeatureFile(file, state, function() {
-					uploadActive = false;
-					refreshFeatures();
-				});
-				return;
-			}
-			if (role === 'feat-cancel') {
-				pendingFile = null;
-				var bar = featBox.querySelector('[data-role="feat-confirmbar"]');
-				if (bar) bar.innerHTML = '';
-				return;
-			}
-
-			/* 在线更新按钮（fwx） */
-			if (el.getAttribute('data-fid')) {
-				var id = el.getAttribute('data-fid');
-				var md5 = el.getAttribute('data-fmd5') || '';
-				el.setAttribute('disabled', 'disabled');
-				callFeatureUpdate(id, md5).catch(function() { return null; })
-					.then(function() { return refreshFeatures(); });
-			}
-		});
-
-		featBox.addEventListener('change', function(ev) {
-			var inp = ev.target;
-			if (!inp || !inp.getAttribute || inp.getAttribute('data-role') !== 'feat-file')
-				return;
-			var file = inp.files && inp.files[0];
-			if (!file) return;
-
-			/* 不立刻传 —— 先出确认条，用户点"确认上传"再开始。
-			 * 同时清掉上一轮的状态条，免得旧红条悬在那误导。 */
-			pendingFile = file;
-			var bar = featBox.querySelector('[data-role="feat-confirmbar"]');
-			var state = featBox.querySelector('[data-role="feat-upstate"]');
-			if (bar) bar.innerHTML = featConfirm(file, curFeatVer);
-			if (state) state.innerHTML = '';
-			inp.value = '';
-		});
-
-		/* ---- 设备备注的行内编辑 ----
-		 * 表格每 3 秒整体重绘，监听一样只能挂在容器上走事件委托。 */
-		function devEditForm(ip, cur) {
-			return '<input class="nv-edit-input" data-role="dev-input" maxlength="64" value="' +
-				esc(cur) + '" placeholder="设备备注，留空清除"> ' +
-				'<button class="nv-feat-btn" data-role="dev-save" data-ip="' + esc(ip) + '">保存</button> ' +
-				'<button class="nv-feat-btn" data-role="dev-cancel">取消</button>';
-		}
-
-		function devEditorCell(ip, cur) {
-			var btn = null, td = null;
-			var nodes = devBox.querySelectorAll('button[data-ip="' + ip.replace(/"/g, '\\"') + '"]');
-			for (var i = 0; i < nodes.length; i++) {
-				if (nodes[i].getAttribute('data-role') === 'dev-edit') { btn = nodes[i]; break; }
-			}
-			if (!btn) return null;
-			td = btn.closest ? btn.closest('td') : btn.parentNode;
-			if (!td) return null;
-			var saved = td.innerHTML;
-			td.innerHTML = devEditForm(ip, cur);
-			var inp = td.querySelector('input[data-role="dev-input"]');
-			if (inp) { inp.focus(); inp.select(); }
-			return saved;
-		}
+		var devEditing = false;   /* 行内编辑备注期间，暂停设备表重绘 */
 
 		devBox.addEventListener('click', function(ev) {
 			var el = ev.target;
@@ -1506,13 +949,15 @@ return view.extend({
 				var ip = el.getAttribute('data-ip') || '';
 				var cur = el.getAttribute('data-cur') || '';
 				td.innerHTML = devEditForm(ip, cur);
+				devEditing = true;
 				var inp = td.querySelector('input[data-role="dev-input"]');
 				if (inp) { inp.focus(); inp.select(); }
 				return;
 			}
 
 			if (role === 'dev-cancel') {
-				refresh();   /* 3s 轮询反正会重绘，这里立即还原 */
+				devEditing = false;
+				refresh();
 				return;
 			}
 
@@ -1530,6 +975,7 @@ return view.extend({
 								res.reason === 'uci_failed' ? '写入配置失败' : res.reason));
 							if (inp2) { el.removeAttribute('disabled'); inp2.focus(); return; }
 						}
+						devEditing = false;
 						refresh();
 					});
 				return;
@@ -1543,14 +989,13 @@ return view.extend({
 				var save = inp.parentNode.querySelector('[data-role="dev-save"]');
 				if (save) save.click();
 			} else if (ev.key === 'Escape') {
+				devEditing = false;
 				refresh();
 			}
 		});
 
 		refresh();
-		refreshFeatures();
 		poll.add(refresh, POLL_INTERVAL);
-		poll.add(refreshFeatures, FEATURE_POLL);
 		/* LuCI's built-in poll only self-starts once its ticker exists, while
 		 * the standalone poll.js older releases shipped never auto-started at
 		 * all. Calling start() explicitly is idempotent and covers both. */

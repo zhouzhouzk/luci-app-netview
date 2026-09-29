@@ -16,8 +16,7 @@ src = src.replace('return view.extend(', 'view.extend(');
 
 const EXPORT = '\n;return { sideHtml, ifTableHtml, connHtml, svcColor, chartSvg,' +
 	' sparkSvg, aggregate, renderDevices, fmtBytes, fmtRate, fmtDuration, fmtProto,' +
-	' fmtSpeed, fmtInt, CSS, truthy, niceMax, smoothPath, appsHtml, APP_STATE_HINT,' +
-	' featHtml, featStatus, featUploadState, featDiag };\n';
+	' fmtSpeed, fmtInt, CSS, truthy, niceMax, smoothPath };\n';
 
 const viewStub = { extend: (o) => o };
 const rpcStub  = { declare: () => () => Promise.resolve(null) };
@@ -281,31 +280,6 @@ check('null 数据不抛错', b.innerHTML.length > 0);
 b = box(); API.renderDevices(b, { devices: [{ ip: '10.0.0.1', host: '', down: 0, up: 0, down_rate: 0, up_rate: 0, conns: 0 }] });
 check('空 host 不泄漏 undefined', dirty(b.innerHTML) === null, dirty(b.innerHTML));
 
-b = box(); API.renderDevices(b, {
-	apps_state: 'ok',
-	devices: [
-		{ ip: '192.168.9.101', host: 'phone', down: 8192, up: 2048, down_rate: 0, up_rate: 0, conns: 4,
-		  apps: [ { name: 'YouTube', up: 1024, down: 7168 },
-		          { name: '抖音',    up: 512,  down: 512 } ] }
-	]
-});
-check('设备行里带出应用名', b.innerHTML.includes('YouTube') && b.innerHTML.includes('抖音'));
-check('识别正常时不插提示条', !b.innerHTML.includes('nv-apphint'));
-check('无 NaN/undefined 泄漏', dirty(b.innerHTML) === null, dirty(b.innerHTML));
-
-b = box(); API.renderDevices(b, {
-	apps_state: 'no_oaf',
-	devices: [{ ip: '192.168.9.101', host: 'phone', down: 1, up: 1, down_rate: 0, up_rate: 0, conns: 1 }]
-});
-check('没装 OAF 时说明原因', b.innerHTML.includes('nv-apphint') && b.innerHTML.includes('kmod-oaf'));
-check('没装 OAF 时不画空应用行', !b.innerHTML.includes('nv-devapps'));
-
-b = box(); API.renderDevices(b, {
-	apps_state: 'no_mark',
-	devices: [{ ip: '192.168.9.101', host: 'phone', down: 1, up: 1, down_rate: 0, up_rate: 0, conns: 1 }]
-});
-check('OAF 就绪但还没识别到流量时另有说法', b.innerHTML.includes('还没有连接被识别'));
-
 /* ----------------------------------------------------- 7. formatting --- */
 
 console.log('\n=== formatting ===');
@@ -479,99 +453,6 @@ check('max=0 不画比例条也不出现 NaN', (function() {
 	return !h.includes('NaN') && h.includes('读不到连接表上限');
 })());
 check('count 缺失按 0 处理', API.connHtml({ max: 100 }).includes('>0<i>'));
-
-/* 应用明细：内核给 conntrack 打的 mark 给出 app_id，bytes= 给出真实流量。
- * 只有被识别出来的连接才计入，所以这些数字加起来小于设备总量是正常的。 */
-const DEV_APPS = [
-	{ name: 'YouTube', up: 1024, down: 7168 },
-	{ name: '抖音',    up: 512,  down: 512 }
-];
-const appOut = API.appsHtml({ apps: DEV_APPS });
-check('列出应用名', appOut.includes('YouTube') && appOut.includes('抖音'));
-check('每项给出上下行之和',
-	appOut.includes(API.fmtBytes(8192)) && appOut.includes(API.fmtBytes(1024)));
-check('悬浮说明带上下行明细',
-	appOut.includes('title=') && appOut.includes('下行') && appOut.includes('上行'));
-check('没有应用时不渲染空壳',
-	API.appsHtml({ apps: [] }) === '' && API.appsHtml({}) === '');
-check('apps 为 null 不崩', API.appsHtml({ apps: null }) === '');
-check('应用名做 HTML 转义',
-	API.appsHtml({ apps: [{ name: '<img src=x>', up: 1, down: 1 }] }).indexOf('<img') === -1);
-check('无 NaN/undefined 泄漏', dirty(appOut) === null, dirty(appOut));
-check('三种缺失状态都有文案', !!(API.APP_STATE_HINT.no_oaf &&
-	API.APP_STATE_HINT.no_names && API.APP_STATE_HINT.no_mark));
-
-/* 特征库卡片：旧架构没有在线接口，但支持本地上传（厂商 zip 配方）。 */
-check('features 无数据不崩', API.featHtml(null).includes('无法读取'));
-check('旧架构显示本地上传入口',
-	API.featHtml({ supported: false, reason: 'no_online_api', local_upload: 1,
-		local: { version: 'v26.04.10', format: 'v3.0', app_count: 13560 } })
-		.includes('本地上传更新') && API.featHtml({ supported: false, local_upload: 1 })
-		.includes('feat-file'));
-check('旧架构显示本地版本与应用数',
-	API.featHtml({ supported: false, reason: 'no_online_api', local_upload: 1,
-		local: { version: 'v26.04.10', format: 'v3.0', app_count: 13560 } })
-		.includes('v26.04.10') && API.featHtml({ supported: false, local_upload: 1,
-		local: { version: 'v26.04.10', format: 'v3.0', app_count: 13560 } })
-		.includes('13,560'));
-check('没装 OAF 给出 no_oaf 文案',
-	API.featHtml({ supported: false, reason: 'no_oaf' }).includes('kmod-oaf'));
-const featOut = API.featHtml({
-	supported: true, token: 1,
-	current: { version: '2026.08.30', app_count: 13422 },
-	online: { files: [
-		{ id: '1001', version: '2026.09.20', count: 13560, date: '2026-09-20', md5: 'ab', desc: '新增 xxx 识别' }
-	] },
-	update: { state: 'idle' }
-});
-check('特征库版本与应用数', featOut.includes('2026.08.30') && featOut.includes('13,422'));
-check('已授权徽标', featOut.includes('已授权'));
-check('在线文件带更新按钮与 id', featOut.includes('data-fid="1001"') && featOut.includes('更新'));
-check('idle 状态不画状态条', featOut.indexOf('nv-feat-status') === -1);
-check('无 NaN/undefined 泄漏', dirty(featOut) === null, dirty(featOut));
-
-const featRun = API.featStatus({ state: 'running', stage: '下载', download_now: 30, download_total: 100 });
-check('下载中给进度', featRun.includes('下载') && featRun.includes('30%'));
-check('进度条宽度', featRun.includes('width:30%'));
-check('失败态带 message', API.featStatus({ state: 'running', message: 'invalid file id' }).includes('invalid file id'));
-check('空 update 不画条', API.featStatus({}) === '');
-check('file id 做 HTML 转义',
-	API.featHtml({ supported: true, current: {}, online: { files: [{ id: '"x"><img', version: '', md5: '' }] }, update: {} })
-		.indexOf('<img') === -1);
-
-/* 本地上传的阶段性反馈。 */
-const upPct = API.featUploadState('progress', 512 * 1024, 1024 * 1024);
-check('上传进度显示百分比与字节', upPct.includes('50%') && upPct.includes('512.00 KB'));
-check('安装中提示', API.featUploadState('installing').includes('解包安装'));
-check('成功报版本与应用数',
-	API.featUploadState('done', { version: 'v26.04.10', app_count: 13560, icons: 300, reload: 1 })
-		.includes('v26.04.10') && API.featUploadState('done',
-		{ version: 'v26.04.10', app_count: 13560, icons: 300, reload: 1 }).includes('热重载'));
-check('失败原因翻译',
-	API.featUploadState('failed', 'bad_format', 'v2.0').includes('v3.0') &&
-	API.featUploadState('failed', 'extract_failed').includes('解压失败'));
-check('未知原因不产生 undefined',
-	dirty(API.featUploadState('failed', undefined, undefined)) === null);
-
-/* 识别链路自检行 */
-const dgOk = API.featDiag({ flows: 120, marked: 37, lan_ifname: 'br-lan', work_mode: '0' });
-check('自检显示连接与已识别数', dgOk.includes('120') && dgOk.includes('37'));
-check('自检显示 lan_ifname 与网关模式', dgOk.includes('br-lan') && dgOk.includes('网关'));
-check('有识别时不出排障提示', dgOk.indexOf('还没给任何连接') === -1);
-const dgBad = API.featDiag({ flows: 80, marked: 0, lan_ifname: 'eth0', work_mode: '1' });
-check('零识别时给出排障提示', dgBad.includes('还没给任何连接') && dgBad.includes('旁路'));
-check('无 diag 不渲染', API.featDiag(undefined) === '');
-check('旧架构卡片带自检行',
-	API.featHtml({ supported: false, local_upload: 1, local: {}, diag: { flows: 1, marked: 0 } })
-		.includes('识别自检'));
-
-/* 应用图标：厂商包按 <appid>.png 命名，两级回退（default.png -> 折叠）。 */
-const appIconOut = API.appsHtml({ apps: [{ name: 'YouTube', id: '1001', up: 1, down: 1 }] });
-check('应用图标指向 appid.png', appIconOut.includes('/luci-static/resources/app_icons/1001.png'));
-check('图标带两级回退', appIconOut.includes('default.png') && appIconOut.includes('display'));
-check('非数字 id 不画图标',
-	API.appsHtml({ apps: [{ name: 'x', id: '#3001', up: 1, down: 1 }] })
-		.indexOf('app_icons/') === -1);
 
 /* 设备备注与 MAC 列 */
 const macBox = { innerHTML: '' };

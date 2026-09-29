@@ -85,12 +85,6 @@
 			<div class="nv-tablewrap" id="devtab"></div>
 		</div>
 
-		<div class="nv-sec">
-			<div class="nv-sec-hd">
-				<h3>应用识别</h3>
-				<span>特征库由 OAF（kmod-oaf + oafd）提供，用于把设备上的应用编号换成名字</span>
-			</div>
-			<div class="nv-featwrap" id="feattab"></div>
 		</div>
 	</div>
 </main>
@@ -108,10 +102,6 @@ var POLL_INTERVAL = 3;
 var MAXPOINTS = 60;
 var MAX_DEVICES = 20;
 
-/* uhttpd 的 ubus POST 上限 64 KiB，base64 膨胀 4/3 —— 每块带 24KB 二进制，
- * 编码后 32KB，给 JSON-RPC 信封留足一半余量。 */
-var UPLOAD_CHUNK = 24 * 1024;
-var ICON_BASE = '/luci-static/resources/app_icons/';
 
 var C_DOWN = '#4a9df5';
 var C_UP   = '#8b5cf6';
@@ -356,18 +346,6 @@ var CSS = [
 	'.nv-edit-input { width: 130px; padding: 2px 6px; font-size: 12px;',
 	'                 border: 1px solid var(--nv-up); border-radius: 5px;',
 	'                 background: var(--nv-card); color: var(--nv-text); }',
-	/* 应用明细挂在设备名下面：小一号、灰色，流量数字回正文字色,
-	 * 免得整行都在抢注意力。名字串太长就省略号收掉。 */
-	'.nv-devapps { display: flex; flex-wrap: wrap; gap: 3px 9px; margin-top: 3px;',
-	'              font-size: 11px; font-weight: 400; color: var(--nv-muted); }',
-	'.nv-devapps span { display: inline-flex; align-items: baseline; gap: 4px;',
-	'                   max-width: 100%; }',
-	'.nv-devapps em { font-style: normal; overflow: hidden; text-overflow: ellipsis;',
-	'                 white-space: nowrap; max-width: 108px; }',
-	'.nv-devapps b { font-weight: 600; color: var(--nv-text);',
-	'                font-variant-numeric: tabular-nums; }',
-	'.nv-apphint { text-align: center; }',
-
 	'.nv-badge { display: inline-block; margin-left: 7px; padding: 1px 7px;',
 	'            border-radius: 999px; font-size: 10px; font-weight: 600;',
 	'            letter-spacing: .03em; vertical-align: 1px;',
@@ -395,36 +373,11 @@ var CSS = [
 	'.nv-empty code { padding: 1px 6px; border-radius: 4px; font-size: 12px;',
 	'                 background: var(--nv-bg); color: var(--nv-text); }',
 
-	/* ---- 特征库卡片 ---- */
-	'.nv-feat { padding: 14px 16px; background: var(--nv-card);',
-	'           border: 1px solid var(--nv-border); border-radius: var(--nv-radius); }',
-	'.nv-feat-hd { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;',
-	'             margin-bottom: 10px; }',
-	'.nv-feat-hd b { font-size: 13px; }',
-	'.nv-feat-ver { color: var(--nv-up); font-weight: 600;',
-	'              font-variant-numeric: tabular-nums; }',
-	'.nv-feat-meta { color: var(--nv-muted); font-size: 11.5px; }',
-	'.nv-feat-row { display: flex; align-items: center; gap: 10px; padding: 8px 2px;',
-	'               border-top: 1px solid var(--nv-border); }',
-	'.nv-feat-row:first-of-type { border-top: none; }',
-	'.nv-feat-info { flex: 1; min-width: 0; }',
-	'.nv-feat-info b { font-size: 12px; }',
-	'.nv-feat-info span { display: block; color: var(--nv-muted); font-size: 11px;',
-	'                      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
-	'.nv-feat-btn { flex: none; padding: 4px 12px; border: 1px solid var(--nv-border);',
-	'               border-radius: 6px; background: var(--nv-bg); color: var(--nv-text);',
-	'               font-size: 11.5px; cursor: pointer; }',
-	'.nv-feat-btn:hover { border-color: var(--nv-up); color: var(--nv-up); }',
-	'.nv-feat-btn[disabled] { opacity: .5; cursor: not-allowed; }',
-	'.nv-feat-status { margin-top: 10px; padding: 8px 10px; border-radius: 6px;',
-	'                  font-size: 11.5px; background: var(--nv-bg); }',
-	'.nv-feat-status.running { color: #d97706; }',
-	'.nv-feat-status.done { color: #16a34a; }',
-	'.nv-feat-status.failed { color: #dc2626; }',
-	'.nv-feat-bar { height: 4px; border-radius: 2px; background: var(--nv-border);',
-	'               margin-top: 6px; overflow: hidden; }',
-	'.nv-feat-bar i { display: block; height: 100%; background: var(--nv-up);',
-	'                transition: width .3s ease; }',
+	'.nv-btn { flex: none; padding: 4px 12px; border: 1px solid var(--nv-border);',
+	'           border-radius: 6px; background: var(--nv-bg); color: var(--nv-text);',
+	'           font-size: 11.5px; cursor: pointer; }',
+	'.nv-btn:hover { border-color: var(--nv-up); color: var(--nv-up); }',
+	'.nv-btn[disabled] { opacity: .5; cursor: not-allowed; }',
 	'.nv-root.nv-force-dark {',
 	'  --nv-bg: #14161c; --nv-card: #1c1f27; --nv-border: #2b3038;',
 	'  --nv-text: #d8dce4; --nv-muted: #8a93a5; --nv-off: #5b6373;',
@@ -653,11 +606,9 @@ function svcColor(name, i) {
 
 /* 连接概况：连接跟踪表的实时占用 + 这些连接都连去了哪儿。
  *
- * 归类数据有两个来源，后端挑一个给：
- *   source = 'oaf'  → OpenAppFilter 的应用分类（真的应用名）
- *   source = 'port' → 远程端口归类（没装 OAF 时的兜底）
- * OAF 只上报时长、不上报字节（见后端说明），所以这里的占比单位是"连接数"
- * 或"使用的设备数"，不是流量 —— 副标题会明说当前是哪种，免得误读。 */
+ * 这里只做端口归类 —— 回答的是"连接都去了哪些服务端口"，与"哪个应用吃了
+ * 多少带宽"是两个问题，后者需要应用级识别（本页当前按端口归类）
+ * 应用标记算出来）。占比单位是连接数，不是流量。 */
 function connHtml(s) {
 	if (!s)
 		return '<div class="nv-conn-hd"><b>连接概况</b>' +
@@ -669,7 +620,6 @@ function connHtml(s) {
 
 	var cnt = Number(s.count) || 0;
 	var max = Number(s.max) || 0;
-	var oaf = s.source === 'oaf';
 	var svcs = (Array.isArray(s.services) ? s.services : []).filter(function(x) {
 		return x && x.name && Number(x.count) > 0;
 	});
@@ -691,8 +641,7 @@ function connHtml(s) {
 	var lvl = pct >= 85 ? '#dc2626' : (pct >= 60 ? '#d97706' : '#16a34a');
 
 	var html = '<div class="nv-conn-hd"><b>连接概况</b><span>' +
-		(oaf ? 'OAF 应用分类 · 按使用设备数占比'
-		     : 'conntrack 实时占用 · 按远程端口归类') +
+		'conntrack 实时占用 · 按远程端口归类' +
 		'</span></div><div class="nv-conn-body">';
 
 	html += '<div class="nv-gauge">' +
@@ -711,8 +660,7 @@ function connHtml(s) {
 			'</div><div class="nv-keys">' + keys + '</div></div>';
 	else
 		html += '<div class="nv-dist"><div class="nv-gauge-s">' +
-			(oaf ? 'OAF 已启用，但还没有应用识别记录'
-			     : '暂时没有可归类的连接') +
+			'暂时没有可归类的连接' +
 			'</div></div>';
 
 	return html + '</div>';
@@ -841,44 +789,6 @@ function ifTableHtml(d) {
 
 /* ------------------------------------------------------------ device table --- */
 
-/* 每台设备用到的应用及其流量。
- *
- * 数据来自内核给 conntrack 打的应用标记 + 连接字节数，所以这是真实字节，
- * 不是 OAF 自己 ubus 接口里的访问时长。只有被识别出来的连接才计入，
- * 各项相加小于设备总量是正常的 —— 差额就是没认出来的流量，不硬凑。 */
-function appsHtml(d) {
-	var apps = Array.isArray(d.apps) ? d.apps : [];
-	if (!apps.length)
-		return '';
-
-	var parts = apps.map(function(a) {
-		var down = Number(a.down) || 0;
-		var up = Number(a.up) || 0;
-		/* 厂商特征包带 <appid>.png 图标。两级回退：先落到 default.png，
-		 * 连它也没有就把 <img> 折叠掉，永远不显示裂图。 */
-		var icon = /^[0-9]+$/.test(String(a.id))
-			? '<img src="' + ICON_BASE + esc(a.id) + '.png" alt="" data-f="0"' +
-			  ' onerror="if(!this.dataset.f){this.dataset.f=1;this.src=\'' +
-			  ICON_BASE + 'default.png\'}else{this.style.display=\'none\'}">'
-			: '';
-		return '<span title="' + esc(a.name + '　下行 ' + fmtBytes(down) +
-			'　上行 ' + fmtBytes(up)) + '">' +
-			icon +
-			'<em>' + esc(a.name) + '</em>' +
-			'<b>' + fmtBytes(down + up) + '</b></span>';
-	});
-
-	return '<div class="nv-devapps">' + parts.join('') + '</div>';
-}
-
-/* 看不到应用时说明卡在哪一环，而不是让那一列莫名其妙地空着。 */
-var APP_STATE_HINT = {
-	no_oaf:   '装上 OAF（kmod-oaf 内核模块 + appfilter 守护进程）后，' +
-	          '每台设备下面会列出它用到的应用与流量',
-	no_names: 'OAF 在运行，但读不到它的特征库，暂时无法把应用编号换成名字',
-	no_mark:  'OAF 已就绪，但还没有连接被识别出来 —— 有点流量经过后就会出现'
-};
-
 function renderDevices(box, data) {
 	if (!data) {
 		box.innerHTML = '<div class="nv-empty">无法读取设备数据</div>';
@@ -934,7 +844,6 @@ function renderDevices(box, data) {
 				(alias ? '<span class="nv-alias-badge" title="手动备注">备注</span>' : '') +
 				'<button class="nv-edit" data-role="dev-edit" data-ip="' + esc(d.ip) + '"' +
 					' data-cur="' + (named ? esc(d.host) : '') + '" title="编辑设备备注">✎</button>' +
-				appsHtml(d) +
 			'</td>' +
 			'<td class="nv-devip">' + esc(d.ip) + '</td>' +
 			'<td class="nv-devmac">' + (d.mac && d.mac !== '-' ? esc(d.mac) : '—') + '</td>' +
@@ -948,297 +857,8 @@ function renderDevices(box, data) {
 		'</tr>';
 	});
 
-	var hint = APP_STATE_HINT[data.apps_state];
-	box.innerHTML = html + '</tbody></table>' +
-		(hint ? '<div class="nv-hint nv-apphint">' + hint + '</div>' : '');
+	box.innerHTML = html + '</tbody></table>';
 }
-
-/* ------------------------------------------------------ feature library --- */
-
-/* OAF 特征库卡片。
- *
- * 新架构（fwx）：特征库是加密的（magic + CRC 头），版本 / 应用数 / 在线目录
- * 全来自 oafd 的 ubus 接口，走在线更新。
- * 旧架构（appfilter）：特征库是明文 feature.cfg，没有在线接口 —— 但厂商的
- * 免费特征包（openappfilter.com 的 zip）正是为它准备的：tar 包里一个
- * feature.cfg + app_icons/ 目录。这里照厂商 LuCI 的同一套配方做本地上传。 */
-function featHtml(f) {
-	if (!f)
-		return '<div class="nv-empty">无法读取 OAF 特征库信息</div>';
-
-	/* 老架构但支持本地上传：显示当前特征库 + 上传控件。 */
-	if (f.local_upload === true || f.local_upload === 1) {
-		var loc = f.local || {};
-		return '<div class="nv-feat">' +
-			'<div class="nv-feat-hd">' +
-				'<b>应用特征库</b>' +
-				'<span class="nv-feat-ver">' +
-					esc(loc.version || '未知版本') + '</span>' +
-				'<span class="nv-feat-meta">' +
-					(Number(loc.app_count) > 0
-						? fmtInt(loc.app_count) + ' 个应用 · ' : '') +
-					'特征格式 ' + esc(loc.format || '未知') + ' · 旧架构走本地上传' +
-				'</span></div>' +
-			'<div class="nv-feat-row">' +
-				'<div class="nv-feat-info">' +
-					'<b>本地上传更新</b>' +
-					'<span>从 openappfilter.com 下载特征包后直接选择上传' +
-					'（zip 或 .bin 均可，无需解压），要求 v3.0 格式</span>' +
-				'</div>' +
-				'<input type="file" class="nv-feat-file" data-role="feat-file"' +
-					' accept=".zip,.tgz,.gz,.bin" style="display:none">' +
-				'<button class="nv-feat-btn" data-role="feat-pick">选择文件…</button>' +
-			'</div>' +
-			'<div data-role="feat-confirmbar"></div>' +
-			'<div data-role="feat-upstate"></div>' +
-			featDiag(f.diag) +
-			featStatus(f.update) +
-			'</div>';
-	}
-
-	/* 没装 OAF：如实说明，不画空壳。 */
-	if (f.supported !== true && f.supported !== 1) {
-		var why = {
-			no_oaf: '没有检测到 OAF（kmod-oaf + oafd 都没就绪），无法做应用识别'
-		}[f.reason] || '当前环境不支持特征库更新';
-		return '<div class="nv-empty">' + esc(why) + '</div>';
-	}
-
-	var cur = f.current || {};
-	var up = f.update || {};
-	var files = Array.isArray(f.online && f.online.files) ? f.online.files : [];
-
-	var hd = '<div class="nv-feat-hd">' +
-		'<b>应用特征库</b>' +
-		'<span class="nv-feat-ver">' + esc(cur.version || '未知版本') + '</span>' +
-		'<span class="nv-feat-meta">' +
-			(Number(cur.app_count) > 0 ? fmtInt(cur.app_count) + ' 个应用' : '未加载') +
-			(f.token === true || f.token === 1 ? ' · 已授权' : '') +
-		'</span></div>';
-
-	if (!files.length) {
-		return '<div class="nv-feat">' + hd +
-			'<div class="nv-feat-meta">在线目录为空 —— 稍后或点刷新重试</div>' +
-			featStatus(up) + '</div>';
-	}
-
-	var rows = files.map(function(x) {
-		var desc = x.desc || '';
-		return '<div class="nv-feat-row">' +
-			'<div class="nv-feat-info">' +
-				'<b>' + esc(x.version || '') + '</b>' +
-				'<span>' + esc(desc) + '　' +
-					(fmtInt(x.count) !== '0' ? fmtInt(x.count) + ' 应用 · ' : '') +
-					esc(x.date || '') + '</span>' +
-			'</div>' +
-			'<button class="nv-feat-btn" data-fid="' + esc(x.id || '') + '"' +
-				' data-fmd5="' + esc(x.md5 || '') + '">更新</button>' +
-		'</div>';
-	}).join('');
-
-	return '<div class="nv-feat">' + hd + rows + featStatus(up) + '</div>';
-}
-
-/* 识别链路自检：应用列为什么是空的，一行说清楚。
- * 内核 DPI 只在入口网卡名包含 lan_ifname、且处于网关模式时才给 conntrack
- * 打应用标记 —— 这两项不对，特征库再新也认不出任何东西。 */
-function featDiag(d) {
-	if (!d) return '';
-	var flows = Number(d.flows) || 0, marked = Number(d.marked) || 0;
-	var parts = [
-		'连接 ' + fmtInt(flows) + ' 条，已识别 ' + fmtInt(marked) + ' 条'
-	];
-	if (d.lan_ifname) parts.push('lan_ifname=' + esc(d.lan_ifname));
-	if (d.work_mode !== '' && d.work_mode != null)
-		parts.push('work_mode=' + esc(d.work_mode) +
-			(String(d.work_mode) === '0' ? '（网关）' : '（旁路）'));
-
-	var tip = '';
-	if (flows > 0 && marked === 0)
-		tip = '<br>内核还没给任何连接打应用标记：检查 lan_ifname 是否为你的 LAN 网桥名' +
-		      '（通常是 br-lan），并确认 OAF 已在「服务 → 应用过滤」中启用';
-
-	return '<div class="nv-feat-meta" data-role="feat-diag" style="margin-top:8px">' +
-		'识别自检：' + parts.join(' · ') + tip + '</div>';
-}
-
-/* 上传前的确认条：显示文件信息，用户点了确认才真正开始传输。 */
-function featConfirm(file, curVer) {
-	return '<div class="nv-feat-status running" data-role="feat-confirm">' +
-		'准备上传 <b>' + esc(file.name) + '</b>（' + fmtBytes(file.size) +
-		'），将替换当前特征库' +
-		(curVer ? '（当前 ' + esc(curVer) + '，原文件备份为 .bak）' : '') +
-		'。<div class="nv-feat-bar"><i style="width:0%"></i></div>' +
-		'<div style="margin-top:6px">' +
-			'<button class="nv-feat-btn" data-role="feat-go">确认上传</button> ' +
-			'<button class="nv-feat-btn" data-role="feat-cancel">取消</button>' +
-		'</div></div>';
-}
-
-/* 本地上传的阶段性反馈。kind: progress / installing / done / failed */
-function featUploadState(kind, a, b) {
-	var cls = 'nv-feat-status';
-	var txt = '';
-	var bar = '';
-
-	if (kind === 'progress') {
-		var pct = Math.min(100, a * 100 / b);
-		txt = '上传中 ' + pct.toFixed(0) + '%（' + fmtBytes(a) + ' / ' +
-			fmtBytes(b) + '）';
-		cls += ' running';
-		bar = '<div class="nv-feat-bar"><i style="width:' + pct + '%"></i></div>';
-	}
-	else if (kind === 'installing') {
-		txt = '上传完成，正在解包安装…';
-		cls += ' running';
-		bar = '<div class="nv-feat-bar"><i style="width:100%"></i></div>';
-	}
-	else if (kind === 'done') {
-		var r = a || {};
-		txt = '✔ 已更新到 ' + (r.version || '?') + '，' +
-			fmtInt(r.app_count) + ' 个应用';
-		if (Number(r.icons) > 0)
-			txt += '，图标 ' + fmtInt(r.icons) + ' 张';
-		txt += Number(r.reload) === 1 ? '，oafd 已热重载' :
-		       Number(r.reload) === 2 ? '，服务已重启' :
-		       '（oafd 未在运行，装好了，下次启动生效）';
-		cls += ' done';
-	}
-	else { /* failed */
-		var why = {
-			no_upload:      '还没有上传文件',
-			too_large:      '文件超过 20MB 上限',
-			decode_failed:  '上传数据损坏，请重试',
-			extract_failed: '解压失败 —— 这个文件不是特征库压缩包',
-			no_feature_cfg: '压缩包里没有 feature.cfg',
-			no_version:     'feature.cfg 缺少 #version 标记',
-			bad_format:     '特征格式不是 v3.0（包内格式：' + (b || '未知') + '）',
-			write_failed:   '写入 /etc/appfilter 失败，检查存储空间'
-		}[a] || (a || '安装失败');
-		txt = '✘ 特征库更新失败：' + why;
-		cls += ' failed';
-	}
-
-	return '<div class="' + cls + '">' + txt + bar + '</div>';
-}
-
-/* 把一个 File 按块 base64 传给 feature_upload，然后触发 feature_install。
- * 全程 Promise 链（文件切片读取是异步的，且块必须按序到达）。
- * 每块最多重试 2 次 —— 一次 rpc 抖动不该让整次上传前功尽弃。 */
-function uploadFeatureFile(file, stateEl, onDone) {
-	function b64OfBlob(blob) {
-		return new Promise(function(resolve, reject) {
-			var r = new FileReader();
-			r.onload = function() {
-				var s = String(r.result);
-				resolve(s.slice(s.indexOf(',') + 1));
-			};
-			r.onerror = function() { reject(r.error || new Error('read failed')); };
-			r.readAsDataURL(blob);
-		});
-	}
-
-	function sendChunk(b64, seq, tries) {
-		return callFeatureUpload(b64, seq).catch(function(err) {
-			if (tries < 2) {
-				return new Promise(function(res) {
-					setTimeout(res, 500 * (tries + 1));
-				}).then(function() { return sendChunk(b64, seq, tries + 1); });
-			}
-			throw err;
-		}).then(function(res) {
-			if (res && res.ok === false)
-				throw { upload: true, reason: res.reason || 'decode_failed' };
-			return res;
-		});
-	}
-
-	var nchunks = Math.ceil(file.size / UPLOAD_CHUNK);
-	var chain = Promise.resolve();
-
-	for (var i = 0; i < nchunks; i++) (function(i) {
-		chain = chain.then(function() {
-			var end = Math.min((i + 1) * UPLOAD_CHUNK, file.size);
-			return b64OfBlob(file.slice(i * UPLOAD_CHUNK, end)).then(function(b64) {
-				return sendChunk(b64, i, 0);
-			}).then(function() {
-				stateEl.innerHTML = featUploadState('progress', end, file.size);
-			});
-		});
-	})(i);
-
-	chain.then(function() {
-		stateEl.innerHTML = featUploadState('installing');
-		return callFeatureInstall();
-	}).then(function(res) {
-		if (res && res.installed === true) {
-			stateEl.innerHTML = featUploadState('done', res);
-		}
-		else {
-			stateEl.innerHTML =
-				featUploadState('failed', res && res.reason, res && res.format);
-		}
-	}).catch(function(err) {
-		var msg;
-		if (err && err.upload) {
-			msg = err.reason;
-		}
-		else {
-			/* 把 LuCI rpc 的真实错误透出来，别再笼统地说"中断" */
-			var raw = String((err && err.message) || err || '');
-			if (/access denied|permission/i.test(raw))
-				msg = '会话没有上传权限（Access denied）—— 请退出 LuCI 重新登录后再试。' +
-				      '新版本新增的接口只对重新登录后的会话生效';
-			else if (/timed? ?out/i.test(raw))
-				msg = '请求超时（' + raw + '），请重试';
-			else if (/not found/i.test(raw))
-				msg = '后端没有这个接口（' + raw + '）—— 执行 /etc/init.d/rpcd reload 后重新登录';
-			else
-				msg = '上传中断：' + (raw || '未知错误');
-		}
-		stateEl.innerHTML = featUploadState('failed', msg);
-	}).finally(function() {
-		/* 无论成败都要复位轮询开关并刷新一次 —— 否则一次失败会让卡片
-		 * 从此不再刷新，旧的失败红条就一直挂着误导人。 */
-		if (onDone) onDone();
-	});
-}
-
-/* 下载 / 安装状态条。oafd 用 state/stage 两个字段 + 一个百分比友好的
- * download_now/download_total 表达进度。 */
-function featStatus(up) {
-	up = up || {};
-	var state = up.state || 'idle';
-	var pct = 0;
-
-	if (Number(up.download_total) > 0)
-		pct = Math.min(100, Number(up.download_now) * 100 / Number(up.download_total));
-
-	var cls = 'nv-feat-status';
-	var txt = '';
-
-	if (state === 'idle' || state === '' || state === 'idle') {
-		return '';
-	}
-
-	if (up.message) {
-		txt = esc(up.message);
-		cls += ' failed';
-	}
-	else if (up.stage) {
-		txt = '正在' + esc(up.stage) + '…' +
-			(pct > 0 ? ' ' + pct.toFixed(0) + '%' : '');
-		cls += ' running';
-	}
-	else {
-		txt = '更新进行中';
-		cls += ' running';
-	}
-
-	var bar = pct > 0 ? '<div class="nv-feat-bar"><i style="width:' + pct + '%"></i></div>' : '';
-	return '<div class="' + cls + '">' + txt + bar + '</div>';
-}
-
 
 function aggregate(list) {
 	var wan = (list || []).filter(function(it) { return it.role === 'WAN'; });
@@ -1261,7 +881,6 @@ var el = {
 	conn:  document.getElementById('conn'),
 	iftab: document.getElementById('iftab'),
 	devtab:document.getElementById('devtab'),
-	feattab: document.getElementById('feattab')
 };
 
 /* 每个接口在预览里的模拟状态。
@@ -1436,7 +1055,151 @@ function refresh() {
 	el.iftab.innerHTML = ifTableHtml({ interfaces: ifaces });
 	el.conn.innerHTML = connHtml(SESSIONS_PORT);
 	renderDevices(el.devtab, sampleDevices());
-	el.feattab.innerHTML = featHtml(sampleFeatures());
+
+	tick++;
+}
+
+function sampleIfaces() {
+	var out = [];
+	IFACES.forEach(function(f) {
+		var dr, ur;
+		if (f.name === 'pppoe-wan') {
+			/* 上传约为下行的 1/3 —— 家庭宽带的典型形态，也让紫色带宽
+			 * 有足够高度可读（对齐 iStoreOS 那张图的观感） */
+			dr = 1.70e6 * envelope(tick, 0.0);
+			ur = 6.20e5 * envelope(tick, 2.4);
+		} else if (f.name === 'eth0') {
+			/* 物理承载口：比 pppoe-wan 略高一点，因为拨号封装本身也有开销，
+			 * 看着更像真实抓包 */
+			dr = 1.79e6 * envelope(tick, 0.0);
+			ur = 6.55e5 * envelope(tick, 2.4);
+		} else if (f.name === 'br-lan') {
+			dr = 8.50e5 * envelope(tick, 1.2);
+			ur = 3.00e5 * envelope(tick, 3.6);
+		} else if (f.name === 'eth1') {
+			dr = 6.00e4 * envelope(tick, 4.1);
+			ur = 1.50e4 * envelope(tick, 5.3);
+		} else if (f.name === 'awg0') {
+			/* VPN 口：量小但在跑 —— 用来盯住"虚拟口也不该被判成未连接" */
+			dr = 4.20e4 * envelope(tick, 3.0);
+			ur = 1.10e4 * envelope(tick, 4.7);
+		} else {
+			dr = 0; ur = 0;
+		}
+		/* 抖动控制在 ±3%：真实链路是有噪的，但过大的抖动会让曲线顶边
+		 * 出现逐样本锯齿，而参考图是丝滑的 */
+		dr *= 0.97 + Math.random() * 0.06;
+		ur *= 0.97 + Math.random() * 0.06;
+
+		if (f.name !== 'docker0') {
+			total[f.name][0] += dr * POLL_INTERVAL;
+			total[f.name][1] += ur * POLL_INTERVAL;
+		}
+
+		out.push({
+			name: f.name, role: f.role, roles: f.roles, state: f.state,
+			link: f.link, kind: f.kind, speed: f.speed,
+			rx: Math.round(total[f.name][0]), tx: Math.round(total[f.name][1]),
+			rx_rate: dr, tx_rate: ur
+		});
+	});
+	return out;
+}
+
+/* 每台设备用到的应用，写成 [名称, 下行占比, 上行占比] —— 占比相对设备自身的
+ * base，这样应用数字会跟着设备总量一起动，不会出现"设备涨、应用不动"的假象。
+ * 最后两台故意不挂应用：真机上没被识别出来的设备就是这样，空着才对。 */
+var DEVICES = [
+	{ ip: '192.168.9.101', host: 'MacBook-Pro.lan', mac: 'A4:83:E7:11:22:33', base: [ 8.4e6, 9.1e5 ], conns: 42,
+	  apps: [ [ [ 'YouTube', 0.62, 0.18, 1001 ], [ 'GitHub', 0.09, 0.31, 1002 ], [ 'Steam', 0.05, 0.04, 1003 ] ] ] },
+	{ ip: '192.168.9.102', host: 'DESKTOP-7K3.lan', mac: '94:E6:F7:22:33:44', base: [ 5.1e6, 3.4e5 ], conns: 28,
+	  apps: [ [ [ '哔哩哔哩', 0.44, 0.12, 1004 ], [ '微信', 0.08, 0.22, 1005 ] ] ] },
+	{ ip: '192.168.9.118', host: 'iPhone-15.lan', mac: 'F0:18:98:33:44:55', base: [ 2.2e6, 1.9e5 ], conns: 17,
+	  apps: [ [ [ '抖音', 0.51, 0.15, 1006 ], [ 'QQ 音乐', 0.13, 0.05, 1007 ] ] ] },
+	{ ip: '192.168.9.120', host: 'nas.lan', mac: '00:11:32:44:55:66', base: [ 1.6e6, 6.2e6 ], conns: 9,
+	  apps: [ [ [ '阿里云盘', 0.30, 0.71, 1008 ] ] ] },
+	{ ip: '192.168.9.133', host: '-', mac: '-', base: [ 4.1e5, 7.4e4 ], conns: 6,
+	  apps: [ [ [ '王者荣耀', 0.74, 0.33, 2001 ] ] ] },
+	{ ip: '192.168.9.144', host: 'raspberrypi.lan', mac: 'B8:27:EB:55:66:77', base: [ 1.8e5, 3.2e4 ], conns: 4 },
+	{ ip: '192.168.9.150', host: 'TV-Box.lan', mac: '6C:21:A2:66:77:88', base: [ 9.2e6, 1.1e5 ], conns: 3,
+	  apps: [ [ [ '爱奇艺', 0.83, 0.21, 1009 ], [ 'Netflix', 0.11, 0.06, 1010 ] ] ] }
+];
+
+function sampleDevices() {
+	/* 相位必须逐设备不同。早期版本拿 base 值取模当相位，而这些 base 又都是
+	 * 10 的倍数，取模后清一色为 0 —— 七台设备的上行速率因此完全相同，
+	 * 一眼就能看出是假数据。改用下标推相位。 */
+	return {
+		apps_state: 'ok',
+		devices: DEVICES.map(function(d, i) {
+			var pd = i * 1.9, pu = i * 2.7;
+
+			d.base[0] += (2.6e5 * envelope(tick, pd)) * POLL_INTERVAL;
+			d.base[1] += (4.0e4 * envelope(tick, pu)) * POLL_INTERVAL;
+
+			return {
+				ip: d.ip, host: d.host, mac: d.mac,
+				aliased: (d.ip === '192.168.9.101') ? 1 : 0,
+				down: Math.round(d.base[0]), up: Math.round(d.base[1]),
+				down_rate: 2.4e5 * envelope(tick, pd),
+				up_rate: 3.4e4 * envelope(tick, pu),
+				conns: d.conns,
+				apps: (d.apps || []).map(function(a) {
+					return {
+						name: a[0],
+						id: a[3],
+						down: Math.round(d.base[0] * a[1]),
+						up:   Math.round(d.base[1] * a[2])
+					};
+				})
+			};
+		})
+	};
+}
+
+var WAN_INFO = {
+	connected: true, uptime: 411567, proto: 'pppoe', device: 'pppoe-wan',
+	ipv4: '100.64.128.37', mask: 32, ipv6: '2408:8207:8c1f:2a00::1',
+	gateway: '100.64.0.1', dns: '192.168.9.1 223.5.5.5', dns_auto: true
+};
+
+/* 连接概况：连接跟踪表的实时占用 + 这些连接都连去了哪儿。
+ * 只做端口归类 —— 应用维度在设备排行那一列，那里靠 conntrack 上的应用
+ * 标记（OAF 打的）+ bytes= 算出真实字节数，比端口更接近"谁在用网"。 */
+var SESSIONS_PORT = {
+	count: 3412, max: 65536,
+	services: [
+		{ name: 'HTTPS', count: 1820 },
+		{ name: 'QUIC',  count: 640 },
+		{ name: 'DNS',   count: 268 },
+		{ name: 'HTTP',  count: 96 },
+		{ name: '其他',  count: 588 }
+	]
+};
+
+function refresh() {
+	var ifaces = sampleIfaces();
+
+	ifaces.forEach(function(it) {
+		var h = ifHist[it.name] || (ifHist[it.name] = []);
+		h.push({ d: it.rx_rate, u: it.tx_rate });
+		while (h.length > MAXPOINTS) h.shift();
+	});
+
+	var agg = aggregate(ifaces);
+	heroHist.push({ d: agg.d, u: agg.u });
+	while (heroHist.length > MAXPOINTS) heroHist.shift();
+
+	el.chart.innerHTML = chartSvg(heroHist);
+	el.now.innerHTML = '<span>上传<b>' + fmtRate(agg.u) + '</b></span>' +
+	                   '<span>下载<b>' + fmtRate(agg.d) + '</b></span>';
+	el.side.innerHTML = sideHtml({
+		wan: 'pppoe-wan', lan: 'br-lan', clients: 12,
+		wan_info: WAN_INFO, interfaces: ifaces
+	});
+	el.iftab.innerHTML = ifTableHtml({ interfaces: ifaces });
+	el.conn.innerHTML = connHtml(SESSIONS_PORT);
+	renderDevices(el.devtab, sampleDevices());
 
 	tick++;
 }

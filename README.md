@@ -36,12 +36,11 @@ ImmortalWrt / OpenWrt 的实时网络流量查看器（LuCI 插件）。
 | IP 地址     | WAN 的 IPv4 / IPv6 / DNS，标注协议（DHCP / PPPoE / 静态）与 DNS 是否自动获取 | `ip addr`、`resolv.conf.auto`     |
 | 网络接口状态    | 各网卡的协商速率（Mbit/s）与它承载的逻辑接口；软件接口没有速率，改报链路状态            | `/sys/class/net/*/speed`        |
 | 网络接口      | 每个接口的实时速率、最近 3 分钟曲线、累计收发                              | `/proc/net/dev`                 |
-| 设备流量排行    | 局域网每台设备的实时速率、累计流量、连接数，以及**每台设备正在用的应用及其字节数**（装了 OAF 时）      | `/proc/net/nf_conntrack`（`bytes=` + OAF 的 `mark`） |
-| 应用识别      | 特征库版本与更新：新架构在线更新目录一键安装，旧架构支持上传厂商 zip 安装（含应用图标） | OAF 的 `fwx` ubus 接口 / `/etc/appfilter/feature.cfg` |
+| 设备流量排行    | 局域网每台设备的实时速率、累计流量、连接数，**MAC 地址**，以及**可手动备注的设备名**          | `/proc/net/nf_conntrack`、`/tmp/dhcp.leases`、`/proc/net/arp` |
 | 连接概况      | 连接跟踪表的实时占用，以及这些连接的目标分布（按远程端口归类）                                | `/proc/sys/net/netfilter/`、`/proc/net/nf_conntrack` |
 
 - **零额外安装**：不依赖 `nlbwmon`、`vnstat`、`collectd`，只用内核已有的 `/proc` 与 `/sys`
-- **可选接入 OAF**：装了 OpenAppFilter（kmod-oaf + oafd）就自动识别每台设备的应用与流量，还能在线更新特征库；没装则回落到纯端口视角，两者都不影响使用（见[可选的 OAF 应用识别](#可选的-oaf-应用识别)）
+- **设备备注可编辑**：设备名旁的铅笔按钮可手动备注，存 `/etc/config/netview`（重启不丢），名称优先于 DHCP 主机名
 - **仅实时**：数据全部驻留内存，不落盘、不写数据库，重启即清空
 - **WAN / LAN 自动识别**：通过 `ifstatus` 解析逻辑接口，自动打标签并优先排序
 - **主图只统计 WAN**：不会把内网互传算成"上网流量"；识别不到 WAN 时退化为全部接口，保证图不空
@@ -141,84 +140,6 @@ rm -f /tmp/luci-indexcache*        # 通配符不能少，实际文件名是 luc
 内核默认 `nf_conntrack_acct=0`（关闭），是 OpenWrt 通过 `kmod-nf-conntrack` 附带的
 `/etc/sysctl.d/11-nf-conntrack.conf` 把它打开的。如果你按某些"优化 NAT 内存"的教程把它关掉了，
 页面会明确提示而不是显示一堆 0。
-
-### 可选的 OAF 应用识别
-
-设备流量排行里，每台设备下面可以列出它**正在用哪些应用、各吃了多少字节**。这个能力来自
-OpenAppFilter（OAF），后端会自动探测：装了就用，没装则这一列留空，并说明卡在哪一环。
-
-| 条件                | 应用识别                                    |
-| ----------------- | --------------------------------------- |
-| 检测到 OAF（新架构） | **应用名 + 真实字节数**，名字来自 OAF 的特征库 |
-| 检测到 OAF（旧架构） | 应用名 + 字节数（旧架构没有在线更新，见下文）        |
-| 其余情况              | 不识别，设备下面不出现应用列                        |
-
-不装 OAF 完全不影响使用。想装的话：
-
-```sh
-opkg update
-opkg install kmod-oaf appfilter luci-app-oaf
-```
-
-> **注意**：这里必须**同时装 `kmod-oaf`（内核模块）和 `appfilter`（守护进程 `oafd`）**。
-> `kmod-oaf` 自己只负责在连接上打应用标记，不识别任何东西；真正把特征库推给内核、
-> 让内核认得出应用的是 `oafd`。只装内核模块、守护进程没起，识别结果永远是空。
-
-**装之前请注意三件事**：
-
-1. `kmod-oaf` 是内核模块，**必须与当前内核版本严格匹配**。ImmortalWrt 官方源里没有，
-   要么自己编译，要么找对应版本的 IPK；版本不符最常见的结果就是模块加载失败。
-2. OAF 与加速、广告过滤类模块存在冲突，上游也提示需要先关掉它们。
-3. **字节数不是 OAF 给的。** OAF 自己的 ubus 回复里所有统计字段都是访问时长，没有字节。
-   netview 的做法是：OAF 内核模块会把识别出的 `app_id` 打进 conntrack 的 `mark` 低 16 位
-   （`FWX_CT_APPID_MASK = 0x0000FFFF`），netview 把它和 conntrack 行里的 `bytes=` 拼起来，
-   得到真实的按应用字节数。所以前提是 **conntrack 记账要开着**（见[设备流量排行](#设备流量排行)）。
-
-netview 用到的接口分两代，后端都会自动识别：
-
-| 代      | ubus 对象 / 调用                                                  |
-| ------- | --------------------------------------------------------------- |
-| 新（fwx）| `ubus call fwx common '{"CopyRight":"…","api":"class_list","data":{}}'`，带 `{code,data}` 信封 |
-| 旧（appfilter）| `ubus call appfilter class_list`，扁平返回                        |
-
-探测内核模块是否加载，看的是 `/proc/net/af_active_app`、`/proc/net/af_conn` 等真实节点
-（**不是** `/proc/sys/oaf` —— 内核模块从来不建那个目录）。
-
-### 特征库更新
-
-特征库更新有两种通道，netview 按装机的 OAF 架构自动二选一：
-
-**新架构（`fwx`）—— 在线更新**
-
-| 能力        | 说明                                                              |
-| ---------- | --------------------------------------------------------------- |
-| 当前版本    | 已加载特征库的版本号与应用数量，来自 `get_feature_info`                     |
-| 在线目录    | 服务器上的可更新列表，来自 `get_feature_online_list`（默认读本地缓存，只有手动检查才联网） |
-| 一键更新    | 点某一条「更新」即触发 `start_feature_online_update` 下载并安装              |
-| 进度展示    | 下载进度、阶段、失败信息，来自 `get_feature_online_update_status`           |
-
-授权 token（如果服务器要求）只显示「已授权 / 未授权」，**从不回传**。
-
-**旧架构（`appfilter`）—— 本地上传**
-
-旧架构没有在线接口，但它读的是**明文**特征库，厂商免费特征包（[openappfilter.com 特征库下载](https://www.openappfilter.com)）正是为它准备的。「应用识别」卡片支持直接上传：
-
-1. 在电脑上从官网下载特征库 zip（如 `feature3.0_cn_26.04.10.zip`），**无需解压**
-2. 在「应用识别」卡片点「选择文件…」上传
-3. 后端按厂商 LuCI 同一配方安装：`tar` 解包 → 校验 `#version` 与 `#format v3.0`
-   → 替换 `/etc/appfilter/feature.cfg`（旧文件备份为 `.bak`）→ 合并 `app_icons/`
-   到 `/www/luci-static/resources/app_icons/` → `SIGUSR1` 让 oafd **热重载**，
-   不用重启服务
-
-安装过程中页面显示上传进度与结果；大文件按 36KB 分块 base64 传输（单条 ubus
-消息约 64KB 上限）。图标就位后，设备流量排行里的应用名旁边会显示对应图标
-（`<app_id>.png`，缺失时回退 `default.png`）。
-
-> 特征库格式必须为 **v3.0**（`feature2.0_*` 的旧包会被拒绝）—— 这是厂商 LuCI
-> 页面同样的校验，旧格式数据库会被新特征引擎误读。
-
-权限上有个细节：这些 `ubus` 调用是 netview 的 rpcd 脚本**以 root 直连**发出的，
-不经过 LuCI 的 ACL，所以 `acl.d` 里不需要额外声明 `appfilter` / `fwx`。
 
 ## 目录结构
 
@@ -382,8 +303,7 @@ python build-ipk.py --list               # 只看载荷清单，不生成文件
 
 服务名（HTTPS / QUIC / DNS…）来自端口查表，不是 DPI。零散端口统一并进"其他"，所以这张表
 回答的是"连接都去了哪类服务"，而不是"每个应用各用了多少带宽"—— 后者见设备流量排行里的
-应用列，靠 OAF 打在 conntrack `mark` 上的 `app_id` 拼上 `bytes=` 算出来（见
-[可选的 OAF 应用识别](#可选的-oaf-应用识别)）。
+应用列需要应用级识别；本页当前按被访问端口归类。
 
 **流量记账检测**：采样前先确认 conntrack 表里存在 `bytes=` 字段。若表里有连接但没有字节计数，
 说明 `nf_conntrack_acct` 被关掉了，接口直接返回 `error: "conntrack_acct_disabled"`，
@@ -478,14 +398,14 @@ node tools/argon-harness.js   # 另：重新生成 preview/argon-harness.html
   并用同一份输入比对 `sideHtml` / `ifTableHtml` / `connHtml` / `chartSvg` / 格式化函数的输出。
   它还盯着 `argon-harness.html` —— 静态骨架和渲染层脚本都要与预览页一致，
   否则"改了预览页忘了重新生成"会让测试页停在旧界面上，而它恰恰是用来判断真机效果的
-- `backend.test.sh` 把脚本里硬编码的 `/sys/class/net` 以及 conntrack / OAF 的路径
+- `backend.test.sh` 把脚本里硬编码的 `/sys/class/net` 以及 conntrack / 租约 / ARP 的路径
   一起重定向到临时假目录，真实执行 `if_speed` / `if_kind` / `if_link` / `if_roles` /
-  `addr_of` / `ct_ports` / `top_list` / `oaf_ready` / `oaf_app_map` / `oaf_classes`。
-  覆盖网桥成员口回退、无线空值、隧道 `-1`、内核给 tun 回默认值 1000、`LOWER_UP` 缺失时
-  靠全局地址兜底、`wan` 与 `wan6` 落在同一物理口等边界；连接表那份假数据专门覆盖了几个
-  容易写错的方向 —— 入站连接的服务端口在 original tuple 里、经端口转发进来的连接
-  original `dst` 是公网地址、IPv6 行必须整条跳过；OAF 那部分则用假 `ubus` 区分
-  "模块加载了" 与 "守护进程真的在跑"，并锁住"同一应用出现在两台设备上计 2"
+  `addr_of` / `ct_ports` / `top_list` / `set_alias`，并用假的 `uci` 走完备注设置到
+  devices 输出的完整往返。覆盖网桥成员口回退、无线空值、隧道 `-1`、内核给 tun 回默认值
+  1000、`LOWER_UP` 缺失时靠全局地址兜底、`wan` 与 `wan6` 落在同一物理口等边界；连接表
+  那份假数据专门覆盖了几个容易写错的方向 —— 入站连接的服务端口在 original tuple 里、
+  经端口转发进来的连接 original `dst` 是公网地址、IPv6 行必须整条跳过；设备名优先级
+  （备注 > DHCP 主机名）与 MAC 双来源（租约 > ARP）也各有断言锁定
 - `menu.test.js` 把上游 dispatcher 的 `resolve_firstchild()`、`ui.js` 的 `ui.menu.getChildren()`
   翻译成 JS 跑，用 `tools/fixtures/menu.d/` 里**原样抓下来的上游 menu.d** 构建菜单树
   （不是自己编的简化版），断言"登录落在 `admin/status/netview`"和"它在「状态」组排第一"。
@@ -516,9 +436,7 @@ node tools/argon-harness.js   # 另：重新生成 preview/argon-harness.html
 | 标题变成一块窄白卡、副标题看不清或"缺一半"         | Argon 把每个 `h2` 都当标题卡片，副标题被挤到页头的 `header::after` 主色横带上（`#8898aa` 叠 `#5e72e4` 仅 1.42:1）。1.1.1 起已修；旧版本可临时在自定义 CSS 里加 `.nv-head h2 { padding:0; background:none; box-shadow:none }` 并把 `.nv-head` 加上背景色 |
 | 暗色模式下卡片全是白的                   | 暗色令牌误用了 `var(--oc-surface, …)`，而 Argon 的 `dark.css` 并不全局重定义 `--oc-*`，暗色下拿到的还是 `#fff`。1.1.1 起暗色值改为写死 |
 | 中文标题行距被压得很扁                   | Argon 有 `h1..h6 { line-height: 1.1 !important }`；1.1.1 起在标题重置里用 `!important` 压回去了                |
-| 「连接概况」显示端口名（HTTPS / QUIC…）而不是应用名 | 正常，连接概况本来就是按端口归类。应用维度在「设备流量排行」每一行的应用列里 —— 那里空了才说明没检测到 OAF。确认 `oafd` 在跑：登录路由器执行 `ubus -v list fwx`（新架构）或 `ubus -v list appfilter`（旧架构），能列出对象才算就绪；内核模块加载了但守护进程没起，应用列同样是空 |
 | 「连接概况」连接数为 0 或提示"读不到连接表上限" | `/proc/sys/net/netfilter/` 不可读，通常是缺 `kmod-nf-conntrack`。这一项与"设备排行"不同：连接数不依赖 conntrack 的流量记账开关，后者关掉也照样能读 |
-| `opkg install kmod-oaf` 失败               | 内核模块必须与内核版本严格匹配。ImmortalWrt 官方源里没有这个包，需要用对应版本的 SDK 自行编译，或找同版本的现成 IPK |
 | 想确认是不是主题把页面带歪了                | 打开 `preview/argon-harness.html`（Argon 骨架 + 官方样式，明暗都能看），与 `overview-preview.html` 对照          |
 | 曲线看起来太"平"                    | 空闲链路上纵轴有 32 KB/s 地板值，避免噪声被放大成满屏尖峰；有实际流量时曲线才会撑起来                            |
 | "已连接设备"数与设备排行条数对不上        | 两个口径不同：前者数 ARP 在线主机，后者只统计经过 NAT 转发且有流量的设备                                     |
