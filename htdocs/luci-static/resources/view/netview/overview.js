@@ -1,3 +1,52 @@
+'use strict';
+'require view';
+'require rpc';
+'require poll';
+
+/*
+ * luci-app-netview -- realtime traffic overview
+ *
+ * Layout (modelled on the iStoreOS QuickStart page):
+ *
+ *   +---------------------------------------+----------------------+
+ *   | 流量统计   [download][upload]   now:  |  已连接互联网          |
+ *   |                                       |  N 已连接设备          |
+ *   |        large gradient area chart      |  IP 地址 / DNS        |
+ *   |                                       |  网络接口状态 (tiles)  |
+ *   +---------------------------------------+----------------------+
+ *   | 网络接口 -- per-interface rate + sparkline + lifetime counters |
+ *   | 设备流量排行 -- LAN clients ranked by aggregated conntrack bytes|
+ *
+ * The hero chart aggregates all WAN-role interfaces (falling back to every
+ * interface when no WAN could be identified), so "traffic" here means what
+ * actually crosses the uplink.
+ *
+ * History lives in memory only: MAXPOINTS samples, i.e. ~3 minutes at a 3
+ * second poll interval.
+ *
+ * Styling is self-contained: every colour resolves through a --nv-* custom
+ * property declared on .nv-root, whose default is itself var(--oc-*, <light
+ * value>). Argon (and any theme that defines --oc-surface / --oc-text / ...)
+ * therefore still drives surfaces and text, while the iStoreOS-inspired
+ * fallbacks keep the page looking right on themes that define nothing.
+ * A prefers-color-scheme block swaps the fallbacks for dark values.
+ */
+
+var callInterfaces = rpc.declare({
+	object: 'netview',
+	method: 'interfaces'
+});
+
+var callDevices = rpc.declare({
+	object: 'netview',
+	method: 'devices'
+});
+
+var callSessions = rpc.declare({
+	object: 'netview',
+	method: 'sessions'
+});
+
 var callSetAlias = rpc.declare({
 	object: 'netview',
 	method: 'set_alias',
