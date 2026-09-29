@@ -300,9 +300,11 @@ var CSS = [
 	'                  border-radius: 999px; font-size: 9.5px; font-weight: 600;',
 	'                  vertical-align: 2px; color: var(--nv-up);',
 	'                  border: 1px solid var(--nv-up); opacity: .75; }',
-	'.nv-edit { border: none; background: none; cursor: pointer; padding: 0 4px;',
-	'           font-size: 11px; color: var(--nv-muted); vertical-align: middle; }',
-	'.nv-edit:hover { color: var(--nv-up); }',
+	'.nv-edit { border: none; background: none; cursor: pointer; padding: 4px 7px;',
+	'           font-size: 14px; line-height: 1; color: var(--nv-muted);',
+	'           vertical-align: middle; border-radius: 6px;',
+	'           -webkit-tap-highlight-color: transparent; }',
+	'.nv-edit:hover, .nv-edit:active { color: var(--nv-up); background: var(--nv-bg); }',
 	'.nv-edit-input { width: 130px; padding: 2px 6px; font-size: 12px;',
 	'                 border: 1px solid var(--nv-up); border-radius: 5px;',
 	'                 background: var(--nv-card); color: var(--nv-text); }',
@@ -986,6 +988,15 @@ return view.extend({
 		}
 
 		var devEditing = false;   /* 行内编辑备注期间，暂停设备表重绘 */
+
+		/* 行内编辑表单：输入框 + 保存/取消。编辑期间 devEditing 置位，
+		 * 3 秒轮询会跳过设备表重绘，输入不会被强制还原。 */
+		function devEditForm(ip, cur) {
+			return '<input class="nv-edit-input" data-role="dev-input" maxlength="64" value="' +
+				esc(cur) + '" placeholder="设备备注，留空清除"> ' +
+				'<button class="nv-btn" data-role="dev-save" data-ip="' + esc(ip) + '">保存</button> ' +
+				'<button class="nv-btn" data-role="dev-cancel">取消</button>';
+		}
 
 		devBox.addEventListener('click', function(ev) {
 			var el = ev.target;
