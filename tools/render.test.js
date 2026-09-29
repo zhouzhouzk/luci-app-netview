@@ -454,23 +454,25 @@ check('max=0 不画比例条也不出现 NaN', (function() {
 })());
 check('count 缺失按 0 处理', API.connHtml({ max: 100 }).includes('>0<i>'));
 
-/* 设备备注与 MAC 列 */
+/* 设备别名与 MAC 列 */
 const macBox = { innerHTML: '' };
 API.renderDevices(macBox, { devices: [
-	{ ip: '192.168.9.5', host: '-', mac: '-', aliased: 0, down: 1, up: 1, conns: 1 },
-	{ ip: '192.168.9.6', host: '妈妈的手机', mac: 'AA:BB:CC:DD:EE:01', aliased: 1, down: 2, up: 2, conns: 2 }
+	{ ip: '192.168.9.5', host: '-', alias: '', mac: '-', down: 1, up: 1, conns: 1 },
+	{ ip: '192.168.9.6', host: '妈妈的手机', alias: '客厅盒子', mac: 'AA:BB:CC:DD:EE:01', down: 2, up: 2, conns: 2 }
 ]});
 const macOut = macBox.innerHTML;
+check('表格有别名列', macOut.includes('<th>别名</th>'));
 check('表格有 MAC 列', macOut.includes('<th>MAC</th>'));
 check('无名字显示未知设备', macOut.includes('未知设备'));
 check('有 MAC 显示地址', macOut.includes('AA:BB:CC:DD:EE:01'));
-check('别名设备带备注徽章', macOut.includes('nv-alias-badge'));
+check('别名列显示别名', macOut.includes('客厅盒子'));
+check('无别名显示未备注', macOut.includes('未备注'));
 check('每行带编辑按钮与 IP', macOut.includes('data-role="dev-edit"') && macOut.includes('data-ip="192.168.9.5"'));
-check('编辑按钮携带当前名称', macOut.includes('data-cur="妈妈的手机"'));
+check('编辑按钮携带当前别名', macOut.includes('data-cur="客厅盒子"'));
 check('无 MAC 显示占位', macOut.includes('—'));
 const escBox = { innerHTML: '' };
-API.renderDevices(escBox, { devices: [{ ip: '1.2.3.4', host: '<x>', aliased: 1, down: 1, up: 1, conns: 1 }] });
-check('别名名字做 HTML 转义', escBox.innerHTML.indexOf('<x>') === -1);
+API.renderDevices(escBox, { devices: [{ ip: '1.2.3.4', host: '<x>', alias: '<img>', down: 1, up: 1, conns: 1 }] });
+check('别名做 HTML 转义', escBox.innerHTML.indexOf('<img>') === -1);
 check('设备表无 NaN/undefined 泄漏', dirty(macOut) === null, dirty(macOut));
 
 check('低占用用绿', API.connHtml({ count: 10, max: 100 }).includes('#16a34a'));

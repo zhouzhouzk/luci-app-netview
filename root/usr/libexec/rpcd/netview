@@ -555,13 +555,13 @@ do_devices() {
 	}
 	END {
 		# "-" placeholder: an empty field would collapse under FS/IFS splitting
-		# and shift every following column.
+		# and shift every following column. host stays the DHCP/ARP-derived
+		# name; the manual alias is a SEPARATE column (its own editable field).
 		for (ip in cn) {
-			nm2 = (ip in al && al[ip] != "") ? al[ip] : \
-			      ((ip in nm && nm[ip] != "") ? nm[ip] : "-")
-			ali = (ip in al && al[ip] != "") ? 1 : 0
+			nm2 = (ip in nm && nm[ip] != "") ? nm[ip] : "-"
+			al2 = (ip in al && al[ip] != "") ? al[ip] : ""
 			mm  = (ip in mc && mc[ip] != "") ? mc[ip] : "-"
-			printf "%s\t%s\t%s\t%d\t%d\t%d\t%d\n", ip, nm2, mm, ali, up[ip], dn[ip], cn[ip]
+			printf "%s\t%s\t%s\t%s\t%d\t%d\t%d\n", ip, nm2, al2, mm, up[ip], dn[ip], cn[ip]
 		}
 	}
 	' "$TMP_MERGE" "$ct" > "$TMP_RAW"
@@ -614,13 +614,13 @@ do_devices() {
 	json_close_array
 	json_add_array "devices"
 
-	while IFS="$(printf '\t')" read -r ip host mac aliased up down dr ur conns; do
+	while IFS="$(printf '\t')" read -r ip host alias mac up down dr ur conns; do
 		[ -n "$ip" ] || continue
 		json_add_object
 		json_add_string "ip" "$ip"
 		json_add_string "host" "$host"
+		json_add_string "alias" "$alias"
 		json_add_string "mac" "$mac"
-		json_add_boolean "aliased" "$aliased"
 		json_add_int    "up" "$up"
 		json_add_int    "down" "$down"
 		json_add_double "up_rate" "$ur"

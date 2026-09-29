@@ -293,6 +293,7 @@ var CSS = [
 	'.nv-up { color: var(--nv-up); }',
 	'.nv-ifname { font-weight: 600; }',
 	'.nv-devname { font-weight: 600; }',
+	'.nv-devalias-text { color: var(--nv-up); font-weight: 600; }',
 	'.nv-devip { color: var(--nv-muted); font-variant-numeric: tabular-nums; }',
 	'.nv-devmac { color: var(--nv-muted); font-size: 11.5px;',
 	'             font-variant-numeric: tabular-nums; white-space: nowrap; }',
@@ -842,7 +843,7 @@ function renderDevices(box, data) {
 	var max = (list[0].down + list[0].up) || 1;
 
 	var html = '<table class="nv-table"><thead><tr>' +
-		'<th>设备</th><th>IP</th><th>MAC</th>' +
+		'<th>设备</th><th>别名</th><th>IP</th><th>MAC</th>' +
 		'<th class="nv-th-r">下行</th><th class="nv-th-r">上行</th>' +
 		'<th>累计流量</th><th class="nv-th-r">连接数</th>' +
 	'</tr></thead><tbody>';
@@ -850,17 +851,19 @@ function renderDevices(box, data) {
 	list.forEach(function(d) {
 		var total = d.down + d.up;
 		var pct = Math.max(3, Math.min(100, (total / max) * 100));
-		/* 名称：手动备注 > DHCP 主机名 > 未知设备。铅笔打开行内编辑。 */
+		/* 设备名 = DHCP/ARP 主机名，只读；别名是独立列，可编辑。 */
 		var named = d.host && d.host !== '-';
 		var nameTxt = named ? esc(d.host) : '未知设备';
-		var alias = truthy(d.aliased) && named;
+		var aliasTxt = d.alias ? esc(d.alias) : '';
 
 		html += '<tr>' +
-			'<td class="nv-devname">' +
-				'<span class="nv-devname-text">' + nameTxt + '</span>' +
-				(alias ? '<span class="nv-alias-badge" title="手动备注">备注</span>' : '') +
+			'<td class="nv-devname">' + nameTxt + '</td>' +
+			'<td class="nv-devalias">' +
+				(aliasTxt
+					? '<span class="nv-devalias-text">' + aliasTxt + '</span>'
+					: '<span class="nv-muted">未备注</span>') +
 				'<button class="nv-edit" data-role="dev-edit" data-ip="' + esc(d.ip) + '"' +
-					' data-cur="' + (named ? esc(d.host) : '') + '" title="编辑设备备注">✎</button>' +
+					' data-cur="' + aliasTxt + '" title="编辑别名">✎</button>' +
 			'</td>' +
 			'<td class="nv-devip">' + esc(d.ip) + '</td>' +
 			'<td class="nv-devmac">' + (d.mac && d.mac !== '-' ? esc(d.mac) : '—') + '</td>' +
@@ -1006,7 +1009,7 @@ return view.extend({
 		 * 3 秒轮询会跳过设备表重绘，输入不会被强制还原。 */
 		function devEditForm(ip, cur) {
 			return '<input class="nv-edit-input" data-role="dev-input" maxlength="64" value="' +
-				esc(cur) + '" placeholder="设备备注，留空清除"> ' +
+				esc(cur) + '" placeholder="别名，留空清除"> ' +
 				'<button class="nv-btn" data-role="dev-save" data-ip="' + esc(ip) + '">保存</button> ' +
 				'<button class="nv-btn" data-role="dev-cancel">取消</button>';
 		}

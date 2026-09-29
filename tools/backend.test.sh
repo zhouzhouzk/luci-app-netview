@@ -338,12 +338,12 @@ echo "=== set_alias（UCI 命名节，按 IP 定位）==="
 OUT=$(printf '{"ip":"192.168.9.6","name":"我的盒子"}' | rpc set_alias)
 ck "设置成功"             "$(printf '%s' "$OUT" | grep -c '"ok":1')" "1"
 OUT=$(rpc devices < /dev/null)
-ck "别名优先于未知"        "$(printf '%s' "$OUT" | grep -c '"host":"我的盒子"')" "1"
-ck "aliased 标志置位"      "$(printf '%s' "$OUT" | grep -c '"aliased":1')" "1"
+ck "别名写入 alias 字段"    "$(printf '%s' "$OUT" | grep -c '"alias":"我的盒子"')" "1"
+ck "host 保持 DHCP 名"     "$(printf '%s' "$OUT" | grep -c '"host":"desktop"')" "1"
 OUT=$(printf '{"ip":"192.168.9.6","name":""}' | rpc set_alias)
 ck "清空备注成功"          "$(printf '%s' "$OUT" | grep -c '"action":"clear"')" "1"
 OUT=$(rpc devices < /dev/null)
-ck "清空后回到未知"        "$(printf '%s' "$OUT" | grep -c '"host":"我的盒子"')" "0"
+ck "清空后 alias 消失"      "$(printf '%s' "$OUT" | grep -c '"alias":"我的盒子"')" "0"
 OUT=$(printf '{"ip":"999","name":"x"}' | rpc set_alias)
 ck "坏 IP 被拒"           "$(printf '%s' "$OUT" | grep -c 'bad_ip')" "1"
 
