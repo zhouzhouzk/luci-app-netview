@@ -1027,17 +1027,26 @@ return view.extend({
 				var inp2 = td2 && td2.querySelector('input[data-role="dev-input"]');
 				var name = inp2 ? inp2.value : '';
 				el.setAttribute('disabled', 'disabled');
-				callSetAlias(ip2, name).catch(function() { return null; })
-					.then(function(res) {
-						if (res && res.ok === false) {
-							alert('保存失败：' + (res.reason === 'bad_ip' ? 'IP 地址无效' :
-								res.reason === 'no_uci' ? '路由器缺少 uci' :
-								res.reason === 'uci_failed' ? '写入配置失败' : res.reason));
-							if (inp2) { el.removeAttribute('disabled'); inp2.focus(); return; }
-						}
-						devEditing = false;
-						refresh();
-					});
+				callSetAlias(ip2, name).then(function(res) {
+					if (res && res.ok === false) {
+						alert('保存失败：' + (res.reason === 'bad_ip' ? 'IP 地址无效' :
+							res.reason === 'no_uci' ? '路由器缺少 uci' :
+							res.reason === 'uci_failed' ? '写入配置失败' : res.reason));
+						if (inp2) { el.removeAttribute('disabled'); inp2.focus(); return; }
+					}
+					devEditing = false;
+					refresh();
+				}).catch(function(err) {
+					/* rpc 调用本身失败（最常见是 ACL Access denied）时也要让
+					 * 用户看到原因，而不是静默刷新 —— 否则看起来就是"没改上"。 */
+					var raw = String((err && err.message) || err || '');
+					var msg = /access denied|permission/i.test(raw)
+						? '没有写入权限（Access denied）—— 请退出 LuCI 重新登录后再试。' +
+						  '新版本新增的接口只对重新登录后的会话生效。'
+						: '保存失败：' + (raw || '网络或会话错误，请重试');
+					alert(msg);
+					if (inp2) el.removeAttribute('disabled');
+				});
 				return;
 			}
 		});
