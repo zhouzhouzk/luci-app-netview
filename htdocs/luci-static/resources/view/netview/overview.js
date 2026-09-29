@@ -52,6 +52,7 @@ var callFeatures = rpc.declare({
 	method: 'features'
 });
 
+/* LuCI 的 rpc.declare 按位置映射 params，所以这些调用都是位置传参。 */
 var callFeatureUpdate = rpc.declare({
 	object: 'netview',
 	method: 'feature_update',
@@ -59,10 +60,28 @@ var callFeatureUpdate = rpc.declare({
 	expect: { started: false }
 });
 
+var callFeatureUpload = rpc.declare({
+	object: 'netview',
+	method: 'feature_upload',
+	params: [ 'chunk', 'seq' ],
+	expect: { ok: false }
+});
+
+var callFeatureInstall = rpc.declare({
+	object: 'netview',
+	method: 'feature_install',
+	expect: { installed: false }
+});
+
 var POLL_INTERVAL = 3;
 var FEATURE_POLL = 30;      /* 特征库目录只在手动/每 30 秒才去问一次 oafd */
 var MAXPOINTS = 60;          /* 60 * 3 s = 3 minutes */
 var MAX_DEVICES = 20;
+
+/* 一条 ubus 消息约 64 KiB 上限，base64 膨胀 4/3 —— 每块带 36KB 二进制，
+ * 编码后 48KB，留足 JSON 信封的余量。 */
+var UPLOAD_CHUNK = 36 * 1024;
+var ICON_BASE = '/luci-static/resources/app_icons/';
 
 /* iStoreOS-inspired data colours. Deliberately fixed rather than derived from
  * the theme accent: they identify the two series across light and dark. */
@@ -845,8 +864,16 @@ function appsHtml(d) {
 	var parts = apps.map(function(a) {
 		var down = Number(a.down) || 0;
 		var up = Number(a.up) || 0;
+		/* 厂商特征包带 <appid>.png 图标。两级回退：先落到 default.png，
+		 * 连它也没有就把 <img> 折叠掉，永远不显示裂图。 */
+		var icon = /^[0-9]+$/.test(String(a.id))
+			? '<img src="' + ICON_BASE + esc(a.id) + '.png" alt="" data-f="0"' +
+			  ' onerror="if(!this.dataset.f){this.dataset.f=1;this.src=\'' +
+			  ICON_BASE + 'default.png\'}else{this.style.display=\'none\'}">'
+			: '';
 		return '<span title="' + esc(a.name + '　下行 ' + fmtBytes(down) +
 			'　上行 ' + fmtBytes(up)) + '">' +
+			icon +
 			'<em>' + esc(a.name) + '</em>' +
 			'<b>' + fmtBytes(down + up) + '</b></span>';
 	});
@@ -930,19 +957,50 @@ function renderDevices(box, data) {
 
 /* ------------------------------------------------------ feature library --- */
 
-/* OAF 特征库卡片。特征库是加密的（magic + CRC 头），本地只能读到大小和时间，
- * 版本 / 应用数 / 在线目录全来自 oafd 的 ubus 接口。只有新架构（fwx）有在线
- * 更新这一整套，老架构（appfilter）直接说"不支持"。 */
+/* OAF 特征库卡片。
+ *
+ * 新架构（fwx）：特征库是加密的（magic + CRC 头），版本 / 应用数 / 在线目录
+ * 全来自 oafd 的 ubus 接口，走在线更新。
+ * 旧架构（appfilter）：特征库是明文 feature.cfg，没有在线接口 —— 但厂商的
+ * 免费特征包（openappfilter.com 的 zip）正是为它准备的：tar 包里一个
+ * feature.cfg + app_icons/ 目录。这里照厂商 LuCI 的同一套配方做本地上传。 */
 function featHtml(f) {
 	if (!f)
 		return '<div class="nv-empty">无法读取 OAF 特征库信息</div>';
 
-	/* 老架构 / 没装 OAF：如实说明，不画空壳。 */
+	/* 老架构但支持本地上传：显示当前特征库 + 上传控件。 */
+	if (f.local_upload === true || f.local_upload === 1) {
+		var loc = f.local || {};
+		return '<div class="nv-feat">' +
+			'<div class="nv-feat-hd">' +
+				'<b>应用特征库</b>' +
+				'<span class="nv-feat-ver">' +
+					esc(loc.version || '未知版本') + '</span>' +
+				'<span class="nv-feat-meta">' +
+					(Number(loc.app_count) > 0
+						? fmtInt(loc.app_count) + ' 个应用 · ' : '') +
+					'特征格式 ' + esc(loc.format || '未知') + ' · 旧架构走本地上传' +
+				'</span></div>' +
+			'<div class="nv-feat-row">' +
+				'<div class="nv-feat-info">' +
+					'<b>本地上传更新</b>' +
+					'<span>从 openappfilter.com 下载特征库 zip 后直接选择上传' +
+					'（无需解压），要求 v3.0 格式</span>' +
+				'</div>' +
+				'<input type="file" class="nv-feat-file" data-role="feat-file"' +
+					' accept=".zip,.tgz,.gz" style="display:none">' +
+				'<button class="nv-feat-btn" data-role="feat-pick">选择文件…</button>' +
+			'</div>' +
+			'<div class="nv-feat-upstate" data-role="feat-upstate"></div>' +
+			featStatus(f.update) +
+			'</div>';
+	}
+
+	/* 没装 OAF：如实说明，不画空壳。 */
 	if (f.supported !== true && f.supported !== 1) {
 		var why = {
-			no_oaf:        '没有检测到 OAF（kmod-oaf + oafd 都没就绪），无法做应用识别',
-			no_online_api: '当前 OAF 是旧架构（appfilter），不带在线更新接口'
-		}[f.reason] || '当前环境不支持特征库在线更新';
+			no_oaf: '没有检测到 OAF（kmod-oaf + oafd 都没就绪），无法做应用识别'
+		}[f.reason] || '当前环境不支持特征库更新';
 		return '<div class="nv-empty">' + esc(why) + '</div>';
 	}
 
@@ -979,6 +1037,99 @@ function featHtml(f) {
 	}).join('');
 
 	return '<div class="nv-feat">' + hd + rows + featStatus(up) + '</div>';
+}
+
+/* 本地上传的阶段性反馈。kind: progress / done / failed */
+function featUploadState(kind, a, b) {
+	var cls = 'nv-feat-status';
+	var txt = '';
+
+	if (kind === 'progress') {
+		var pct = Math.min(100, a * 100 / b);
+		txt = '上传中 ' + pct.toFixed(0) + '%（' + fmtBytes(a) + ' / ' +
+			fmtBytes(b) + '）';
+		cls += ' running';
+	}
+	else if (kind === 'installing') {
+		txt = '正在解包安装…';
+		cls += ' running';
+	}
+	else if (kind === 'done') {
+		var r = a || {};
+		txt = '已更新到 ' + (r.version || '?') + '，' +
+			fmtInt(r.app_count) + ' 个应用';
+		if (Number(r.icons) > 0)
+			txt += '，图标 ' + fmtInt(r.icons) + ' 张';
+		txt += Number(r.reload) === 1 ? '，oafd 已热重载' :
+		       Number(r.reload) === 2 ? '，服务已重启' :
+		       '（oafd 未在运行，装好了，下次启动生效）';
+		cls += ' done';
+	}
+	else { /* failed */
+		var why = {
+			no_upload:      '还没有上传文件',
+			too_large:      '文件超过 20MB 上限',
+			decode_failed:  '上传数据损坏，请重试',
+			extract_failed: '解压失败 —— 这个文件不是特征库压缩包',
+			no_feature_cfg: '压缩包里没有 feature.cfg',
+			no_version:     'feature.cfg 缺少 #version 标记',
+			bad_format:     '特征格式不是 v3.0（包内格式：' + (b || '未知') + '）',
+			write_failed:   '写入 /etc/appfilter 失败，检查存储空间'
+		}[a] || (a || '安装失败');
+		txt = '特征库更新失败：' + why;
+		cls += ' failed';
+	}
+
+	return '<div class="' + cls + '">' + txt + '</div>';
+}
+
+/* 把一个 File 按块 base64 传给 feature_upload，然后触发 feature_install。
+ * 全程 Promise 链（文件切片读取是异步的，且块必须按序到达）。 */
+function uploadFeatureFile(file, stateEl, onDone) {
+	function b64OfBlob(blob) {
+		return new Promise(function(resolve, reject) {
+			var r = new FileReader();
+			r.onload = function() {
+				var s = String(r.result);
+				resolve(s.slice(s.indexOf(',') + 1));
+			};
+			r.onerror = function() { reject(r.error || new Error('read failed')); };
+			r.readAsDataURL(blob);
+		});
+	}
+
+	var nchunks = Math.ceil(file.size / UPLOAD_CHUNK);
+	var chain = Promise.resolve();
+
+	for (var i = 0; i < nchunks; i++) (function(i) {
+		chain = chain.then(function() {
+			var end = Math.min((i + 1) * UPLOAD_CHUNK, file.size);
+			return b64OfBlob(file.slice(i * UPLOAD_CHUNK, end)).then(function(b64) {
+				return callFeatureUpload(b64, i);
+			}).then(function(res) {
+				if (res && res.ok === false)
+					throw { upload: true, reason: res.reason || 'decode_failed' };
+				stateEl.innerHTML = featUploadState('progress', end, file.size);
+			});
+		});
+	})(i);
+
+	chain.then(function() {
+		stateEl.innerHTML = featUploadState('installing');
+		return callFeatureInstall();
+	}).then(function(res) {
+		if (res && res.installed === true) {
+			stateEl.innerHTML = featUploadState('done', res);
+			if (onDone) onDone();
+		}
+		else {
+			stateEl.innerHTML =
+				featUploadState('failed', res && res.reason, res && res.format);
+		}
+	}).catch(function(err) {
+		stateEl.innerHTML = featUploadState('failed',
+			err && err.upload ? err.reason : '上传中断，请重试');
+	});
 }
 
 /* 下载 / 安装状态条。oafd 用 state/stage 两个字段 + 一个百分比友好的
@@ -1135,11 +1286,11 @@ return view.extend({
 			});
 		}
 
-		/* 特征库单独拉，节奏慢得多（在线目录只有手动/网络刷新才联网，轮询
-		 * 只读本地缓存）。它和 3 秒主轮询解耦，避免把 oafd 拖进高频 ubus。 */
+		/* 上传期间暂停特征库自动刷新，免得卡片在进度显示中途被重绘。 */
+		var uploadActive = false;
 		var featPending = false;
 		function refreshFeatures() {
-			if (featPending) return;
+			if (featPending || uploadActive) return;
 			featPending = true;
 			return callFeatures().catch(function() { return null; }).then(function(f) {
 				featBox.innerHTML = featHtml(f);
@@ -1148,21 +1299,45 @@ return view.extend({
 			});
 		}
 
-		/* 更新按钮走事件委托：卡片内容每 30 秒会被 innerHTML 整个换掉，
-		 * 逐个绑 click 会随着重绘失效。 */
+		/* 更新按钮与文件选择都走事件委托：卡片内容每 30 秒会被 innerHTML
+		 * 整个换掉，逐个绑监听会随着重绘失效。 */
 		featBox.addEventListener('click', function(ev) {
-			var btn = ev.target;
-			while (btn && btn !== featBox && !(btn.getAttribute && btn.getAttribute('data-fid')))
-				btn = btn.parentNode;
-			if (!btn || btn === featBox) return;
+			var el = ev.target;
+			while (el && el !== featBox && !(el.getAttribute && el.getAttribute('data-role')))
+				el = el.parentNode;
+			if (!el || el === featBox) return;
+			var role = el.getAttribute('data-role');
 
-			var id = btn.getAttribute('data-fid');
-			var md5 = btn.getAttribute('data-fmd5') || '';
-			if (!id) return;
+			if (role === 'feat-pick') {
+				var inp = featBox.querySelector('input[data-role="feat-file"]');
+				if (inp) inp.click();
+				return;
+			}
 
-			btn.setAttribute('disabled', 'disabled');
-			callFeatureUpdate({ id: id, md5: md5 }).catch(function() { return null; })
-				.then(function() { return refreshFeatures(); });
+			/* 在线更新按钮（fwx） */
+			if (el.getAttribute('data-fid')) {
+				var id = el.getAttribute('data-fid');
+				var md5 = el.getAttribute('data-fmd5') || '';
+				el.setAttribute('disabled', 'disabled');
+				callFeatureUpdate(id, md5).catch(function() { return null; })
+					.then(function() { return refreshFeatures(); });
+			}
+		});
+
+		featBox.addEventListener('change', function(ev) {
+			var inp = ev.target;
+			if (!inp || !inp.getAttribute || inp.getAttribute('data-role') !== 'feat-file')
+				return;
+			var file = inp.files && inp.files[0];
+			if (!file) return;
+
+			var state = featBox.querySelector('[data-role="feat-upstate"]');
+			if (!state) return;
+			uploadActive = true;
+			uploadFeatureFile(file, state, function() {
+				uploadActive = false;
+				refreshFeatures();
+			});
 		});
 
 		refresh();

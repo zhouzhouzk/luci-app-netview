@@ -151,7 +151,7 @@ function loadViewApi(src) {
 	s = s.replace('return view.extend(', 'view.extend(');
 	const EXPORT = '\n;return { sideHtml, ifTableHtml, connHtml, chartSvg, sparkSvg,' +
 		' aggregate, renderDevices, appsHtml, APP_STATE_HINT, fmtBytes, fmtRate,' +
-		' fmtDuration, fmtProto, fmtSpeed, truthy, featHtml, featStatus, CSS };\n';
+		' fmtDuration, fmtProto, fmtSpeed, truthy, featHtml, featStatus, featUploadState, CSS };\n';
 	const f = new Function('view', 'rpc', 'poll', 'E', s + EXPORT);
 	return f({ extend: o => o }, { declare: () => () => Promise.resolve(null) },
 	         { add: () => {}, start: () => {} }, () => ({}));
@@ -160,7 +160,7 @@ function loadViewApi(src) {
 function loadPreviewApi(layer) {
 	const EXPORT = '\n;return { sideHtml, ifTableHtml, connHtml, chartSvg, sparkSvg,' +
 		' aggregate, renderDevices, appsHtml, APP_STATE_HINT, fmtBytes, fmtRate,' +
-		' fmtDuration, fmtProto, fmtSpeed, truthy, featHtml, featStatus, CSS };\n';
+		' fmtDuration, fmtProto, fmtSpeed, truthy, featHtml, featStatus, featUploadState, CSS };\n';
 	return new Function(layer + EXPORT)();
 }
 
@@ -223,9 +223,14 @@ if (viewApi && prevApi) {
 	};
 	same('featHtml 输出一致（在线目录）',
 		viewApi.featHtml(feat), prevApi.featHtml(feat));
-	same('featHtml 输出一致（老架构）',
-		viewApi.featHtml({ supported: false, reason: 'no_online_api' }),
-		prevApi.featHtml({ supported: false, reason: 'no_online_api' }));
+	const featOld = {
+		supported: false, reason: 'no_online_api', local_upload: 1,
+		local: { version: 'v26.04.10', format: 'v3.0', app_count: 13560,
+		         size: 4823449, modified: 1758000000 },
+		update: { state: 'idle' }
+	};
+	same('featHtml 输出一致（旧架构本地上传）',
+		viewApi.featHtml(featOld), prevApi.featHtml(featOld));
 	same('featHtml 输出一致（无 OAF）',
 		viewApi.featHtml({ supported: false, reason: 'no_oaf' }),
 		prevApi.featHtml({ supported: false, reason: 'no_oaf' }));
@@ -237,6 +242,15 @@ if (viewApi && prevApi) {
 		prevApi.featStatus({ state: 'running', message: 'invalid file id' }));
 	same('featStatus 输出一致（idle）',
 		viewApi.featStatus({ state: 'idle' }), prevApi.featStatus({ state: 'idle' }));
+	same('featUploadState 输出一致（进度）',
+		viewApi.featUploadState('progress', 512 * 1024, 1024 * 1024),
+		prevApi.featUploadState('progress', 512 * 1024, 1024 * 1024));
+	same('featUploadState 输出一致（完成）',
+		viewApi.featUploadState('done', { version: 'v26.04.10', app_count: 13560, icons: 300, reload: 1 }),
+		prevApi.featUploadState('done', { version: 'v26.04.10', app_count: 13560, icons: 300, reload: 1 }));
+	same('featUploadState 输出一致（失败）',
+		viewApi.featUploadState('failed', 'bad_format', 'v2.0'),
+		prevApi.featUploadState('failed', 'bad_format', 'v2.0'));
 
 	const hist = [];
 	for (let i = 0; i < 60; i++) hist.push({ d: 1.7e6 * (1 + Math.sin(i / 9)), u: 3e5 });

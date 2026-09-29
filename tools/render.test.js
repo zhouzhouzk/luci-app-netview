@@ -17,7 +17,7 @@ src = src.replace('return view.extend(', 'view.extend(');
 const EXPORT = '\n;return { sideHtml, ifTableHtml, connHtml, svcColor, chartSvg,' +
 	' sparkSvg, aggregate, renderDevices, fmtBytes, fmtRate, fmtDuration, fmtProto,' +
 	' fmtSpeed, fmtInt, CSS, truthy, niceMax, smoothPath, appsHtml, APP_STATE_HINT,' +
-	' featHtml, featStatus };\n';
+	' featHtml, featStatus, featUploadState };\n';
 
 const viewStub = { extend: (o) => o };
 const rpcStub  = { declare: () => () => Promise.resolve(null) };
@@ -501,10 +501,19 @@ check('无 NaN/undefined 泄漏', dirty(appOut) === null, dirty(appOut));
 check('三种缺失状态都有文案', !!(API.APP_STATE_HINT.no_oaf &&
 	API.APP_STATE_HINT.no_names && API.APP_STATE_HINT.no_mark));
 
-/* 特征库卡片：只有新架构（fwx）有在线更新，老架构/没装 OAF 要如实说明。 */
+/* 特征库卡片：旧架构没有在线接口，但支持本地上传（厂商 zip 配方）。 */
 check('features 无数据不崩', API.featHtml(null).includes('无法读取'));
-check('老架构给出 no_online_api 文案',
-	API.featHtml({ supported: false, reason: 'no_online_api' }).includes('旧架构'));
+check('旧架构显示本地上传入口',
+	API.featHtml({ supported: false, reason: 'no_online_api', local_upload: 1,
+		local: { version: 'v26.04.10', format: 'v3.0', app_count: 13560 } })
+		.includes('本地上传更新') && API.featHtml({ supported: false, local_upload: 1 })
+		.includes('feat-file'));
+check('旧架构显示本地版本与应用数',
+	API.featHtml({ supported: false, reason: 'no_online_api', local_upload: 1,
+		local: { version: 'v26.04.10', format: 'v3.0', app_count: 13560 } })
+		.includes('v26.04.10') && API.featHtml({ supported: false, local_upload: 1,
+		local: { version: 'v26.04.10', format: 'v3.0', app_count: 13560 } })
+		.includes('13,560'));
 check('没装 OAF 给出 no_oaf 文案',
 	API.featHtml({ supported: false, reason: 'no_oaf' }).includes('kmod-oaf'));
 const featOut = API.featHtml({
@@ -529,6 +538,28 @@ check('空 update 不画条', API.featStatus({}) === '');
 check('file id 做 HTML 转义',
 	API.featHtml({ supported: true, current: {}, online: { files: [{ id: '"x"><img', version: '', md5: '' }] }, update: {} })
 		.indexOf('<img') === -1);
+
+/* 本地上传的阶段性反馈。 */
+const upPct = API.featUploadState('progress', 512 * 1024, 1024 * 1024);
+check('上传进度显示百分比与字节', upPct.includes('50%') && upPct.includes('512.00 KB'));
+check('安装中提示', API.featUploadState('installing').includes('解包安装'));
+check('成功报版本与应用数',
+	API.featUploadState('done', { version: 'v26.04.10', app_count: 13560, icons: 300, reload: 1 })
+		.includes('v26.04.10') && API.featUploadState('done',
+		{ version: 'v26.04.10', app_count: 13560, icons: 300, reload: 1 }).includes('热重载'));
+check('失败原因翻译',
+	API.featUploadState('failed', 'bad_format', 'v2.0').includes('v3.0') &&
+	API.featUploadState('failed', 'extract_failed').includes('解压失败'));
+check('未知原因不产生 undefined',
+	dirty(API.featUploadState('failed', undefined, undefined)) === null);
+
+/* 应用图标：厂商包按 <appid>.png 命名，两级回退（default.png -> 折叠）。 */
+const appIconOut = API.appsHtml({ apps: [{ name: 'YouTube', id: '1001', up: 1, down: 1 }] });
+check('应用图标指向 appid.png', appIconOut.includes('/luci-static/resources/app_icons/1001.png'));
+check('图标带两级回退', appIconOut.includes('default.png') && appIconOut.includes('display'));
+check('非数字 id 不画图标',
+	API.appsHtml({ apps: [{ name: 'x', id: '#3001', up: 1, down: 1 }] })
+		.indexOf('app_icons/') === -1);
 
 check('低占用用绿', API.connHtml({ count: 10, max: 100 }).includes('#16a34a'));
 check('过 60% 转琥珀', API.connHtml({ count: 70, max: 100 }).includes('#d97706'));

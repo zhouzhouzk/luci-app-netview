@@ -9,7 +9,9 @@
 #                      including a per-application breakdown when OAF is around
 #   sessions        -> connection table occupancy + remote-port breakdown
 #   features        -> OAF signature database version and the online catalogue
-#   feature_update  -> start an OAF signature download + install
+#   feature_update  -> start an OAF signature download + install (fwx only)
+#   feature_upload  -> append one base64 chunk of a vendor package (old gen)
+#   feature_install -> extract + install the uploaded package (old gen)
 #
 # OAF is optional throughout: every method above answers without it, and the
 # ones that use it say which link in the chain is missing.
@@ -435,6 +437,23 @@ OAF_FEATURE_FILE="/etc/fwxd/feature.bin"
 OAF_FEATURE_LIST="/etc/fwxd/feature_list.json"
 OAF_TOKEN_UCI="fwx.global.feature_token"
 
+# Local signature-database update (old architecture). oafd of the old
+# generation reads a *plaintext* feature.cfg -- the very file the vendor's
+# upload packages carry. Same install recipe as the vendor's own LuCI page:
+# tar -xzf -> check "#version" / "#format v3.0" -> replace
+# /etc/appfilter/feature.cfg -> copy app_icons/ -> SIGUSR1 the daemon.
+OAF_CFG_DIR="/etc/appfilter"
+OAF_CFG_FILE="/etc/appfilter/feature.cfg"
+OAF_ICONS_DIR="/www/luci-static/resources/app_icons"
+FEAT_UP_TMP="$WORKDIR/feature.upload"
+FEAT_EXTRACT="$WORKDIR/featup"
+FEAT_MAX_SIZE=$((20 * 1024 * 1024))
+
+# First "#version" / "#format" / app-entry count of the local plaintext cfg.
+cfg_version() { sed -n 's/^#version[ \t]*//p'  "$OAF_CFG_FILE" 2>/dev/null | head -n1; }
+cfg_format()  { sed -n 's/^#format[ \t]*//p'   "$OAF_CFG_FILE" 2>/dev/null | head -n1; }
+cfg_apps()    { grep -c '^[0-9][0-9]* ' "$OAF_CFG_FILE" 2>/dev/null; }
+
 # Has oaf.ko been loaded?
 oaf_mod() {
 	local p
@@ -643,6 +662,8 @@ ct_apps() {
 
 # Swap app ids for names, then keep the top N per device by up+down.
 # Unknown ids fall back to "#<id>" so they surface instead of silently vanishing.
+# The raw id rides along in the last column: the page uses it to show the
+# per-app icon the vendor packages ship under /luci-static/resources/app_icons.
 app_join() {
 	awk -F'\t' -v top="${1:-3}" '
 		NR == FNR { if (FNR > 1) name[$1] = $3; next }
@@ -652,6 +673,7 @@ app_join() {
 			k = $1 "\t" nm
 			u[k] += $3
 			d[k] += $4
+			aid[k] = $2
 		}
 		END {
 			for (k in u) {
@@ -661,6 +683,7 @@ app_join() {
 				nmv[ip, n] = a[2]
 				uv[ip, n] = u[k]
 				dv[ip, n] = d[k]
+				idv[ip, n] = aid[k]
 			}
 			for (ip in cnt) {
 				m = cnt[ip]
@@ -674,7 +697,7 @@ app_join() {
 				}
 				lim = (m < top) ? m : top
 				for (i = 1; i <= lim; i++)
-					printf "%s\t%s\t%d\t%d\n", ip, nmv[ip, o[i]], uv[ip, o[i]], dv[ip, o[i]]
+					printf "%s\t%s\t%d\t%d\t%s\n", ip, nmv[ip, o[i]], uv[ip, o[i]], dv[ip, o[i]], idv[ip, o[i]]
 			}
 		}
 	' "$TMP_APPMAP" "$TMP_APPRAW"
@@ -952,14 +975,14 @@ do_devices() {
 	}
 	' "$TMP_RAW" > "$TMP_DEV"
 
-	# Fold each device's app list onto its line as "name:up:down" joined by "|",
-	# so the JSON loop below stays a single pass over one file.
+	# Fold each device's app list onto its line as "name:up:down:id" joined by
+	# "|", so the JSON loop below stays a single pass over one file.
 	if [ -s "$TMP_APPFIN" ]; then
 		awk -F'\t' '
 			NR == FNR {
 				if ($1 != "") {
 					s = ($1 in acc) ? acc[$1] "|" : ""
-					acc[$1] = s $2 ":" $3 ":" $4
+					acc[$1] = s $2 ":" $3 ":" $4 ":" $5
 				}
 				next
 			}
@@ -993,11 +1016,16 @@ do_devices() {
 			IFS="|"
 			for a in $apps; do
 				[ -n "$a" ] || continue
-				rest="${a#*:}"
+				rest="${a#*:}"            # up:down:id
+				aup="${rest%%:*}"
+				rest="${rest#*:}"         # down:id
+				adn="${rest%%:*}"
+				aid="${rest#*:}"
 				json_add_object
 				json_add_string "name" "${a%%:*}"
-				json_add_int    "up"   "${rest%%:*}"
-				json_add_int    "down" "${rest#*:}"
+				json_add_int    "up"   "$(num_or0 "$aup")"
+				json_add_int    "down" "$(num_or0 "$adn")"
+				json_add_string "id"   "$aid"
 				json_close_object
 			done
 			IFS="$oldifs"
@@ -1076,9 +1104,22 @@ do_features() {
 			return
 			;;
 		old)
+			# The old daemon has no online channel, but it reads a
+			# plaintext cfg -- so a local upload works here, and it is
+			# exactly what the vendor's own LuCI page does.
 			json_add_boolean "supported" 0
 			json_add_string  "gen" "old"
 			json_add_string  "reason" "no_online_api"
+			json_add_boolean "local_upload" 1
+			json_add_object "local"
+			json_add_string "version"   "$(cfg_version)"
+			json_add_string "format"    "$(cfg_format)"
+			json_add_int    "app_count" "$(num_or0 "$(cfg_apps)")"
+			json_add_int    "size"      "$(f_size  "$OAF_CFG_FILE")"
+			json_add_int    "modified"  "$(f_mtime "$OAF_CFG_FILE")"
+			json_close_object
+			feat_update "$(printf '%s' '{"state":"idle"}' | json_flat \
+				"state stage status_code message id icons_skipped download_total download_now elapsed")"
 			json_dump
 			return
 			;;
@@ -1187,6 +1228,165 @@ do_feature_update() {
 	json_dump
 }
 
+# ------------------------------------------------- local feature upload ---
+#
+# The old-generation daemon reads a PLAINTEXT feature.cfg; the vendor's free
+# packages (openappfilter.com) are tar.gz archives carrying exactly that file
+# plus an app_icons/ directory. The vendor's own LuCI page installs them with
+# this recipe, which is mirrored here:
+#
+#   tar -xzf -> find feature.cfg -> require "#version" + "#format v3.0"
+#   -> replace /etc/appfilter/feature.cfg -> merge app_icons/ into /www
+#   -> SIGUSR1 oafd (hot reload, no service restart) -> clean up.
+#
+# The file arrives base64-chunked: one ubus message caps out around 64 KiB, so
+# feature_upload appends one decoded chunk per call (seq 0 starts a fresh
+# file) and feature_install runs the recipe above.
+
+# stdin {"chunk":"<base64>","seq":<n>} -> {"received":<bytes>,"limit":<max>}
+do_feature_upload() {
+	local json chunk seq
+	json=$(oaf_req)
+	chunk=""; seq=0
+	if [ -n "$json" ]; then
+		json_init
+		json_load "$json"
+		json_get_var chunk chunk
+		json_get_var seq seq
+	fi
+	case "$seq" in ''|*[!0-9]*) seq=0 ;; esac
+
+	json_init
+	if [ "$seq" = "0" ]; then
+		: > "$FEAT_UP_TMP"
+	fi
+
+	if [ -n "$chunk" ]; then
+		if ! printf '%s' "$chunk" | base64 -d >> "$FEAT_UP_TMP" 2>/dev/null; then
+			json_add_boolean "ok" 0
+			json_add_string  "reason" "decode_failed"
+			json_dump
+			return
+		fi
+	fi
+
+	local size
+	size=$(f_size "$FEAT_UP_TMP")
+	if [ "$size" -gt "$FEAT_MAX_SIZE" ]; then
+		rm -f "$FEAT_UP_TMP"
+		json_add_boolean "ok" 0
+		json_add_string  "reason" "too_large"
+		json_dump
+		return
+	fi
+
+	json_add_boolean "ok" 1
+	json_add_int    "received" "$size"
+	json_add_int    "limit" "$FEAT_MAX_SIZE"
+	json_dump
+}
+
+# Run the install recipe over the uploaded package.
+do_feature_install() {
+	local size cfg ver fmt apps reload free_kb icons_kb icons
+
+	json_init
+	json_add_int "timestamp" "$(date +%s)"
+
+	size=$(f_size "$FEAT_UP_TMP")
+	if [ "$size" -le 0 ]; then
+		json_add_boolean "installed" 0
+		json_add_string  "reason" "no_upload"
+		json_dump
+		return
+	fi
+
+	# The vendor's "zip" files are tar.gz archives; busybox tar handles them.
+	rm -rf "$FEAT_EXTRACT"
+	mkdir -p "$FEAT_EXTRACT"
+	if ! tar -zxf "$FEAT_UP_TMP" -C "$FEAT_EXTRACT" 2>/dev/null; then
+		json_add_boolean "installed" 0
+		json_add_string  "reason" "extract_failed"
+		json_dump
+		return
+	fi
+
+	cfg="$FEAT_EXTRACT/feature.cfg"
+	if [ ! -s "$cfg" ]; then
+		json_add_boolean "installed" 0
+		json_add_string  "reason" "no_feature_cfg"
+		json_dump
+		return
+	fi
+
+	ver=$(sed -n 's/^#version[ \t]*//p' "$cfg" | head -n1)
+	fmt=$(sed -n 's/^#format[ \t]*//p'  "$cfg" | head -n1)
+	if [ -z "$ver" ]; then
+		json_add_boolean "installed" 0
+		json_add_string  "reason" "no_version"
+		json_dump
+		return
+	fi
+	# Same rule as the vendor page: the daemon of this generation speaks the
+	# v3.0 feature format, and an older database would silently mis-detect.
+	if [ "$fmt" != "v3.0" ]; then
+		json_add_boolean "installed" 0
+		json_add_string  "reason" "bad_format"
+		json_add_string  "format" "${fmt:-unknown}"
+		json_dump
+		return
+	fi
+
+	# .new + mv keeps a half-written database from ever becoming live, and the
+	# .bak gives the user one manual step back.
+	mkdir -p "$OAF_CFG_DIR"
+	[ -f "$OAF_CFG_FILE" ] && cp -f "$OAF_CFG_FILE" "$OAF_CFG_FILE.bak" 2>/dev/null
+	if ! cp -f "$cfg" "$OAF_CFG_FILE.new" 2>/dev/null; then
+		json_add_boolean "installed" 0
+		json_add_string  "reason" "write_failed"
+		json_dump
+		return
+	fi
+	mv -f "$OAF_CFG_FILE.new" "$OAF_CFG_FILE"
+	chmod 666 "$OAF_CFG_FILE"
+
+	# Icons are pure sugar; the vendor page skips them when /overlay runs low
+	# and so does this. A df we cannot read is no reason to skip -- only a
+	# measured shortfall is.
+	icons=0
+	if [ -d "$FEAT_EXTRACT/app_icons" ]; then
+		free_kb=$(df -k /overlay 2>/dev/null | awk 'END { print $4 }')
+		icons_kb=$(du -sk "$FEAT_EXTRACT/app_icons" 2>/dev/null | awk '{ print $1 }')
+		case "$free_kb" in ''|*[!0-9]*) free_kb="" ;; esac
+		case "$icons_kb" in ''|*[!0-9]*) icons_kb=0 ;; esac
+		if [ -z "$free_kb" ] || [ "$icons_kb" -le "$free_kb" ]; then
+			mkdir -p "$OAF_ICONS_DIR"
+			cp -rf "$FEAT_EXTRACT/app_icons/." "$OAF_ICONS_DIR/" 2>/dev/null
+			icons=$(ls "$OAF_ICONS_DIR" 2>/dev/null | grep -c '\.png$')
+		fi
+	fi
+
+	# Hot reload; fall back to a service bounce when no daemon is listening.
+	reload=0
+	if killall -SIGUSR1 oafd 2>/dev/null; then
+		reload=1
+	elif [ -x /etc/init.d/appfilter ] && /etc/init.d/appfilter restart >/dev/null 2>&1; then
+		reload=2
+	fi
+
+	apps=$(cfg_apps)
+	rm -rf "$FEAT_EXTRACT"
+	rm -f "$FEAT_UP_TMP"
+
+	json_add_boolean "installed" 1
+	json_add_string  "version" "$ver"
+	json_add_string  "format" "$fmt"
+	json_add_int     "app_count" "$(num_or0 "$apps")"
+	json_add_int     "icons" "$(num_or0 "$icons")"
+	json_add_int     "reload" "$reload"
+	json_dump
+}
+
 # --------------------------------------------------------------- sessions ---
 
 # Connection table occupancy plus a breakdown of what those connections talk to.
@@ -1232,16 +1432,20 @@ case "$1" in
 	list)
 		echo '{ "interfaces": {}, "devices": {}, "sessions": {},'
 		echo '  "features": { "refresh": "boolean" },'
-		echo '  "feature_update": { "id": "string", "md5": "string" } }'
+		echo '  "feature_update": { "id": "string", "md5": "string" },'
+		echo '  "feature_upload": { "chunk": "string", "seq": "number" },'
+		echo '  "feature_install": {} }'
 		;;
 	call)
 		case "$2" in
-			interfaces)     do_interfaces ;;
-			devices)        do_devices ;;
-			sessions)       do_sessions ;;
-			features)       do_features ;;
-			feature_update) do_feature_update ;;
-			*)              echo '{}' ;;
+			interfaces)      do_interfaces ;;
+			devices)         do_devices ;;
+			sessions)        do_sessions ;;
+			features)        do_features ;;
+			feature_update)  do_feature_update ;;
+			feature_upload)  do_feature_upload ;;
+			feature_install) do_feature_install ;;
+			*)               echo '{}' ;;
 		esac
 		;;
 	*)

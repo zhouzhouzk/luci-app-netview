@@ -500,14 +500,114 @@ ck "入站连接的方向要翻过来"        "$(printf '%s\n' "$APP" | grep -F 
 ck "十六进制的 mark 也能解"        "$(printf '%s\n' "$APP" | grep -F "$(printf '192.168.9.102\t1001\t')")" "$(printf '192.168.9.102\t1001\t100\t500')"
 
 echo ""
-echo "=== app_join（换成应用名 + 每设备只留 Top N）==="
+echo "=== app_join（换成应用名 + 每设备只留 Top N，尾列带原始 appid）==="
 FAKE_OAF=old oaf_map_fetch
 ct_apps "$SB/ct_apps.txt" > "$TMP_APPRAW"
 ck "Top 3 时 4 行全留"           "$(app_join 3 | wc -l | tr -d ' ')" "4"
-ck "appid 换成了应用名"          "$(app_join 3 | grep -cF "$(printf '192.168.9.101\tYouTube\t3000\t12000')")" "1"
-ck "未收录的 appid 用 #id 兜底"  "$(app_join 3 | grep -cF "$(printf '192.168.9.104\t#3001\t')")" "1"
+ck "appid 换成了应用名"          "$(app_join 3 | grep -cF "$(printf '192.168.9.101\tYouTube\t3000\t12000\t1001')")" "1"
+ck "未收录的 appid 用 #id 兜底"  "$(app_join 3 | grep -cF "$(printf '192.168.9.104\t#3001\t2800\t700\t3001')")" "1"
 ck "Top 1 时每台设备只剩一行"     "$(app_join 1 | wc -l | tr -d ' ')" "3"
 ck "Top 1 留的是流量大的那个"     "$(app_join 1 | grep -cF '王者荣耀')" "1"
+
+# ---- RPC-layer tests --------------------------------------------------------
+# The entry point needs jshn; the router ships it, the sandbox does not. This
+# stand-in implements just the primitives the script uses -- enough to drive
+# feature_upload / feature_install end to end and to assert on their output.
+cat > "$SB/jshn.sh" <<'EOS'
+JSON_OUT=""; JSON_IN=""
+json_init() { JSON_OUT=""; }
+json_load() { JSON_IN="$1"; }
+json_get_var() {
+	local __var="$1" __key="$2" __v=""
+	__v=$(printf '%s' "$JSON_IN" | awk -v key="$__key" '
+		{ n = split($0, t, "\"")
+		  for (i = 1; i <= n; i++)
+		  	if (t[i] == key && t[i+1] ~ /^[ \t]*:/) { print t[i+2]; exit } }')
+	if [ -z "$__v" ]; then
+		__v=$(printf '%s' "$JSON_IN" | \
+			sed -n 's/.*"'"$__key"'":[ \t]*\([0-9][0-9]*\).*/\1/p' | head -n1)
+	fi
+	eval "$__var=\"\$__v\""
+}
+json_add_string()  { JSON_OUT="$JSON_OUT\"$1\":\"$2\","; }
+json_add_int()     { JSON_OUT="$JSON_OUT\"$1\":$2,"; }
+json_add_boolean() { JSON_OUT="$JSON_OUT\"$1\":$2,"; }
+json_add_object()  { JSON_OUT="${JSON_OUT:-}\"$1\":{"; }
+json_close_object(){ JSON_OUT="${JSON_OUT:-}},"; }
+json_add_array()   { JSON_OUT="${JSON_OUT:-}\"$1\":["; }
+json_close_array() { JSON_OUT="${JSON_OUT:-}],"; }
+json_dump()        { printf '{%s}\n' "${JSON_OUT%,}"; }
+EOS
+
+# A full copy of the backend with every filesystem knob aimed at the sandbox.
+sed \
+	-e "s#^CT_SYS=.*#CT_SYS=\"$SB/proc/sys/net/netfilter\"#" \
+	-e "s#^CT_TABLE=.*#CT_TABLE=\"$SB/proc/nf_conntrack\"#" \
+	-e "s#^CT_TABLE_ALT=.*#CT_TABLE_ALT=\"$SB/proc/ip_conntrack\"#" \
+	-e "s#^WORKDIR=.*#WORKDIR=\"$SB/work\"#" \
+	-e "s#^OAF_MOD_PROCS=.*#OAF_MOD_PROCS=\"$SB/proc/net/af_active_app $SB/proc/net/af_conn\"#" \
+	-e "s#^OAF_CFG_DIR=.*#OAF_CFG_DIR=\"$SB/appfilter\"#" \
+	-e "s#^OAF_CFG_FILE=.*#OAF_CFG_FILE=\"$SB/appfilter/feature.cfg\"#" \
+	-e "s#^OAF_ICONS_DIR=.*#OAF_ICONS_DIR=\"$SB/www/app_icons\"#" \
+	-e "s#^FEAT_UP_TMP=.*#FEAT_UP_TMP=\"$SB/work/feature.upload\"#" \
+	-e "s#^FEAT_EXTRACT=.*#FEAT_EXTRACT=\"$SB/work/featup\"#" \
+	-e "s#/sys/class/net#$SB/sys/class/net#g" \
+	-e "s#^\. /usr/share/libubox/jshn.sh#. \"$SB/jshn.sh\"#" \
+	"$SRC" > "$SB/netview.rpc"
+
+mkdir -p "$SB/appfilter" "$SB/www/app_icons"
+printf '#version v26.04.10\n#format v3.0\n#id name:[proto]\n1001 YouTube:[tcp;;443;youtube;;]\n2001 王者荣耀:[tcp;;;;;00:33]\n' \
+	> "$SB/appfilter/feature.cfg"
+# rpc() runs the full backend entry. Calls that pass a request payload pipe it
+# in themselves; every other call MUST be given </dev/null -- oaf_req reads
+# stdin when it is not a tty, and an inherited never-EOF pipe would hang it.
+# (rpcd itself closes stdin after writing the args, so the real path is fine.)
+rpc() { PATH="$SB/bin:$PATH" sh "$SB/netview.rpc" call "$@"; }
+
+echo ""
+echo "=== features（旧架构：报本地 cfg + 本地上传能力）==="
+OUT=$(FAKE_OAF=old rpc features < /dev/null)
+ck "标记本地上传可用"     "$(printf '%s' "$OUT" | grep -c '"local_upload":1')" "1"
+ck "读到本地版本"        "$(printf '%s' "$OUT" | grep -c '"version":"v26.04.10"')" "1"
+ck "读到应用数"          "$(printf '%s' "$OUT" | grep -c '"app_count":2')" "1"
+
+echo ""
+echo "=== feature_upload（base64 分块落盘）==="
+B64H=$(printf 'hello' | base64)
+B64W=$(printf ' world' | base64)
+OUT=$(printf '{"chunk":"%s","seq":0}' "$B64H" | rpc feature_upload)
+ck "首块确认"             "$(printf '%s' "$OUT" | grep -c '"ok":1')" "1"
+OUT=$(printf '{"chunk":"%s","seq":1}' "$B64W" | rpc feature_upload)
+ck "追加块确认"           "$(printf '%s' "$OUT" | grep -c '"ok":1')" "1"
+ck "落盘字节正确"         "$(cat "$SB/work/feature.upload")" "hello world"
+OUT=$(printf '{"chunk":"%s","seq":0}' '%%%' | rpc feature_upload)
+ck "坏 base64 报 decode_failed" "$(printf '%s' "$OUT" | grep -c 'decode_failed')" "1"
+rm -f "$SB/work/feature.upload"
+
+echo ""
+echo "=== feature_install（解压 -> 校验 -> 安装 -> 热重载）==="
+mkdir -p "$SB/pkg/app_icons"
+printf '#version v26.04.10\n#format v3.0\n#id name:[proto]\n1001 YouTube:[tcp;;443;youtube;;]\n' > "$SB/pkg/feature.cfg"
+printf 'png' > "$SB/pkg/app_icons/1001.png"
+tar -zcf "$SB/pkg.tar.gz" -C "$SB/pkg" feature.cfg app_icons
+cp "$SB/pkg.tar.gz" "$SB/work/feature.upload"
+OUT=$(rpc feature_install < /dev/null)
+ck "安装成功"             "$(printf '%s' "$OUT" | grep -c '"installed":1')" "1"
+ck "报出新版本"           "$(printf '%s' "$OUT" | grep -c '"version":"v26.04.10"')" "1"
+ck "cfg 已替换"           "$(head -1 "$SB/appfilter/feature.cfg")" "#version v26.04.10"
+ck "图标已就位"           "$(ls "$SB/www/app_icons" | grep -c '1001.png')" "1"
+ck "上传临时文件已清理"    "$([ -e "$SB/work/feature.upload" ]; echo $?)" "1"
+ck "备份已生成"           "$([ -f "$SB/appfilter/feature.cfg.bak" ]; echo $?)" "0"
+ck "计数重读自新 cfg"      "$(printf '%s' "$OUT" | grep -c '"app_count":1')" "1"
+
+printf '#version v26.03.01\n#format v2.0\n1001 老格式:[tcp;;80;;]\n' > "$SB/pkg/feature.cfg"
+tar -zcf "$SB/pkg.tar.gz" -C "$SB/pkg" feature.cfg
+cp "$SB/pkg.tar.gz" "$SB/work/feature.upload"
+OUT=$(rpc feature_install < /dev/null)
+ck "v2.0 格式被拒"        "$(printf '%s' "$OUT" | grep -c 'bad_format')" "1"
+rm -f "$SB/work/feature.upload"
+OUT=$(rpc feature_install < /dev/null)
+ck "没有上传时报 no_upload" "$(printf '%s' "$OUT" | grep -c 'no_upload')" "1"
 
 echo ""
 echo "======================================"

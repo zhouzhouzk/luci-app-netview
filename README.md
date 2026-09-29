@@ -37,7 +37,7 @@ ImmortalWrt / OpenWrt 的实时网络流量查看器（LuCI 插件）。
 | 网络接口状态    | 各网卡的协商速率（Mbit/s）与它承载的逻辑接口；软件接口没有速率，改报链路状态            | `/sys/class/net/*/speed`        |
 | 网络接口      | 每个接口的实时速率、最近 3 分钟曲线、累计收发                              | `/proc/net/dev`                 |
 | 设备流量排行    | 局域网每台设备的实时速率、累计流量、连接数，以及**每台设备正在用的应用及其字节数**（装了 OAF 时）      | `/proc/net/nf_conntrack`（`bytes=` + OAF 的 `mark`） |
-| 应用识别      | 特征库版本、在线更新目录，一键下载安装新特征库                                          | OAF 的 `fwx` ubus 接口                |
+| 应用识别      | 特征库版本与更新：新架构在线更新目录一键安装，旧架构支持上传厂商 zip 安装（含应用图标） | OAF 的 `fwx` ubus 接口 / `/etc/appfilter/feature.cfg` |
 | 连接概况      | 连接跟踪表的实时占用，以及这些连接的目标分布（按远程端口归类）                                | `/proc/sys/net/netfilter/`、`/proc/net/nf_conntrack` |
 
 - **零额外安装**：不依赖 `nlbwmon`、`vnstat`、`collectd`，只用内核已有的 `/proc` 与 `/sys`
@@ -186,7 +186,9 @@ netview 用到的接口分两代，后端都会自动识别：
 
 ### 特征库更新
 
-只有**新架构（`fwx`）**带特征库在线更新，netview 把它代理到页面上的「应用识别」卡片：
+特征库更新有两种通道，netview 按装机的 OAF 架构自动二选一：
+
+**新架构（`fwx`）—— 在线更新**
 
 | 能力        | 说明                                                              |
 | ---------- | --------------------------------------------------------------- |
@@ -196,6 +198,24 @@ netview 用到的接口分两代，后端都会自动识别：
 | 进度展示    | 下载进度、阶段、失败信息，来自 `get_feature_online_update_status`           |
 
 授权 token（如果服务器要求）只显示「已授权 / 未授权」，**从不回传**。
+
+**旧架构（`appfilter`）—— 本地上传**
+
+旧架构没有在线接口，但它读的是**明文**特征库，厂商免费特征包（[openappfilter.com 特征库下载](https://www.openappfilter.com)）正是为它准备的。「应用识别」卡片支持直接上传：
+
+1. 在电脑上从官网下载特征库 zip（如 `feature3.0_cn_26.04.10.zip`），**无需解压**
+2. 在「应用识别」卡片点「选择文件…」上传
+3. 后端按厂商 LuCI 同一配方安装：`tar` 解包 → 校验 `#version` 与 `#format v3.0`
+   → 替换 `/etc/appfilter/feature.cfg`（旧文件备份为 `.bak`）→ 合并 `app_icons/`
+   到 `/www/luci-static/resources/app_icons/` → `SIGUSR1` 让 oafd **热重载**，
+   不用重启服务
+
+安装过程中页面显示上传进度与结果；大文件按 36KB 分块 base64 传输（单条 ubus
+消息约 64KB 上限）。图标就位后，设备流量排行里的应用名旁边会显示对应图标
+（`<app_id>.png`，缺失时回退 `default.png`）。
+
+> 特征库格式必须为 **v3.0**（`feature2.0_*` 的旧包会被拒绝）—— 这是厂商 LuCI
+> 页面同样的校验，旧格式数据库会被新特征引擎误读。
 
 权限上有个细节：这些 `ubus` 调用是 netview 的 rpcd 脚本**以 root 直连**发出的，
 不经过 LuCI 的 ACL，所以 `acl.d` 里不需要额外声明 `appfilter` / `fwx`。

@@ -8,7 +8,7 @@
 		},
 		"write": {
 			"ubus": {
-				"netview": [ "feature_update" ]
+				"netview": [ "feature_update", "feature_upload", "feature_install" ]
 			}
 		}
 	}
