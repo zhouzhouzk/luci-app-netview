@@ -91,6 +91,7 @@ TMP_RAW="$WORKDIR/dev.raw";    TMP_DEV="$WORKDIR/dev.diff"
 TMP_ALIAS="$WORKDIR/alias.list"; TMP_MERGE="$WORKDIR/names.merge"
 CT_TABLE="$SB/nf_conntrack";   CT_TABLE_ALT="$SB/no_ip_conntrack"
 DHCP_LEASES="$SB/dhcp.leases"; ARP_FILE="$SB/arp"
+UCI_CFG="$SB/netview.config"
 mkdir -p "$WORKDIR"
 
 pass=0; fail=0
@@ -135,6 +136,19 @@ ck "动作为 clear"   "$(printf '%s' "$s" | grep -o '"action":"[a-z]*"')" '"act
 out=$(do_devices)
 has "$out" '"ip":"192.168.9.7","host":"tv-box","alias":"","mac":"aa:bb:cc:dd:ee:02"' && r5=1 || r5=0
 ck "清空后别名回空" "$r5" "1"
+
+echo ""
+echo "=== sessions：连接表占用 + 端口归类 ==="
+mkdir -p "$SB/ctsys"
+printf '187234\n' > "$SB/ctsys/nf_conntrack_count"
+printf '262144\n' > "$SB/ctsys/nf_conntrack_max"
+CT_SYS="$SB/ctsys"
+s=$(do_sessions)
+ck "占用 count/max 正确" "$(printf '%s' "$s" | grep -o '"count":[0-9]*,"max":[0-9]*')" '"count":187234,"max":262144'
+ck "来源标记 port"       "$(printf '%s' "$s" | grep -o '"source":"[a-z]*"')" '"source":"port"'
+printf '%s\n' "$s" | grep -q '"name":"HTTPS"' && r=1 || r=0
+ck "443/tcp 归类为 HTTPS" "$r" "1"
+CT_SYS="/proc/sys/net/netfilter"
 
 echo ""
 echo "=== 非法 MAC 拒绝 ==="

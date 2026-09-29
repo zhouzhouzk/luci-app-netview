@@ -48,6 +48,11 @@ var callSetAlias = rpc.declare({
 	params: [ 'mac', 'name' ]
 });
 
+var callSessions = rpc.declare({
+	object: 'netview',
+	method: 'sessions'
+});
+
 var POLL_INTERVAL = 3;
 var MAXPOINTS = 60;          /* 60 * 3 s = 3 minutes */
 var MAX_DEVICES = 20;
@@ -57,6 +62,15 @@ var devEditing = false;      /* 编辑别名期间暂停设备表重绘，防止
  * the theme accent: they identify the two series across light and dark. */
 var C_DOWN = '#4a9df5';
 var C_UP   = '#8b5cf6';
+
+/* Palette for the connection breakdown. Fixed hues rather than theme ramps:
+ * the segments must stay distinguishable in light and dark, and each one is
+ * named in the legend directly under the bar. 其他 is the merged tail and
+ * always grey, so the bar reads the same way on every poll. All five clear
+ * 3:1 against the light card and the dark one -- they carry information, so
+ * they are held to the non-text contrast floor rather than to "looks fine". */
+var SVC_COLORS = [ '#3b82f6', '#8b5cf6', '#16a34a', '#d97706', '#db2777' ];
+var SVC_REST   = '#64748b';
 
 /* A floor keeps an idle link from scaling its own noise to full height. */
 var SCALE_FLOOR = 32 * 1024;
@@ -141,7 +155,9 @@ var CSS = [
 	'           background: var(--nv-ok); margin-right: 5px; vertical-align: 1px; }',
 
 	/* ---- hero grid ---- */
-	'.nv-hero { display: grid; gap: 16px; align-items: start;',
+	/* 不用 align-items:start：左列必须拉伸，图表下面那张卡才能吃掉与右列的
+	 * 高度差。只用内容高度的话 flex-grow 无从发力，留白还在。 */
+	'.nv-hero { display: grid; gap: 16px;',
 	'           grid-template-columns: minmax(0, 1fr) 364px; }',
 	'@media (max-width: 1000px) { .nv-hero { grid-template-columns: minmax(0, 1fr); } }',
 
@@ -166,6 +182,44 @@ var CSS = [
 	'.nv-chart-empty { height: 292px; display: flex; align-items: center;',
 	'                  justify-content: center; font-size: 12.5px;',
 	'                  color: var(--nv-muted); }',
+
+	/* ---- connection overview ---- */
+	/* The side column stacks four cards and ends up taller than the chart, so
+	 * the grid row is sized by the side column and the left column would stop
+	 * short, leaving a hole under the chart. .nv-col is a flex column and this
+	 * card takes the slack via flex-grow, which equalises the two columns
+	 * without pinning the chart to a magic height. */
+	'.nv-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }',
+	'.nv-conn { flex: 1 1 auto; display: flex; flex-direction: column;',
+	'          padding: 15px 17px 16px; min-height: 148px; }',
+	'.nv-conn-hd { display: flex; align-items: baseline; flex-wrap: wrap;',
+	'              gap: 4px 10px; margin-bottom: 14px; }',
+	'.nv-conn-hd b { font-size: 13px; font-weight: 600; }',
+	'.nv-conn-hd span { font-size: 11.5px; color: var(--nv-muted); }',
+	'.nv-conn-body { flex: 1 1 auto; display: flex; align-items: center;',
+	'               gap: 26px; flex-wrap: wrap; }',
+	'.nv-gauge { flex: 0 0 172px; }',
+	'.nv-gauge-n { font-size: 25px; font-weight: 600; line-height: 1.05;',
+	'             font-variant-numeric: tabular-nums; }',
+	'.nv-gauge-n i { font-style: normal; font-size: 12px; font-weight: 400;',
+	'               color: var(--nv-muted); margin-left: 5px; }',
+	'.nv-gauge-s { margin-top: 6px; font-size: 11.5px; color: var(--nv-muted); }',
+	/* taller than the table's inline bar: this one is the page's only read on
+	 * how full the connection table is, so it has to be readable at a glance */
+	'.nv-conn .nv-track { height: 8px; border-radius: 4px; margin: 10px 0 0; }',
+	'.nv-dist { flex: 1 1 220px; min-width: 0; }',
+	'.nv-stack { display: flex; height: 12px; border-radius: 6px;',
+	'           overflow: hidden; background: var(--nv-bg); }',
+	'.nv-stack i { display: block; height: 100%; }',
+	'.nv-keys { display: grid; gap: 7px 20px; margin-top: 13px;',
+	'           grid-template-columns: repeat(2, minmax(0, 1fr)); }',
+	'.nv-key { display: flex; align-items: center; gap: 7px; min-width: 0;',
+	'          font-size: 11.5px; }',
+	'.nv-key i { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 2px; }',
+	'.nv-key em { font-style: normal; min-width: 0; overflow: hidden;',
+	'            text-overflow: ellipsis; white-space: nowrap; }',
+	'.nv-key b { margin-left: auto; padding-left: 6px; font-weight: 600;',
+	'           color: var(--nv-muted); font-variant-numeric: tabular-nums; }',
 
 	/* ---- side column ---- */
 	'.nv-side { display: flex; flex-direction: column; gap: 16px; }',
@@ -329,6 +383,13 @@ function fmtBytes(n) {
 
 function fmtRate(n) {
 	return fmtBytes(n) + '/s';
+}
+
+/* Thousands separators for a plain integer count (connection table sizes run
+ * into five digits, which nobody parses at a glance without them). */
+function fmtInt(n) {
+	n = Math.round(Number(n) || 0);
+	return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
 function fmtDuration(sec) {
@@ -534,6 +595,74 @@ function sparkSvg(points) {
 }
 
 /* ------------------------------------------------------------ side column --- */
+
+/* Segment colour. 其他 is the merged tail and keeps grey wherever it lands, so
+ * the bar never implies that the tail is one more named category. */
+function svcColor(name, i) {
+	if (name === '其他')
+		return SVC_REST;
+	return SVC_COLORS[Math.min(i, SVC_COLORS.length - 1)];
+}
+
+/* 连接概况：连接跟踪表的实时占用 + 这些连接都连去了哪儿。
+ *
+ * 占比单位是"连接数"，不是流量 —— 副标题会明说，免得误读。 */
+function connHtml(s) {
+	if (!s)
+		return '<div class="nv-conn-hd"><b>连接概况</b>' +
+			'<span>连接跟踪不可用</span></div>' +
+			'<div class="nv-conn-body"><div class="nv-dist">' +
+			'<div class="nv-gauge-s">后端没有返回这项数据。' +
+			'需要 <b>kmod-nf-conntrack</b>，且后端版本不低于 1.1.4。</div>' +
+			'</div></div>';
+
+	var cnt = Number(s.count) || 0;
+	var max = Number(s.max) || 0;
+	var svcs = (Array.isArray(s.services) ? s.services : []).filter(function(x) {
+		return x && x.name && Number(x.count) > 0;
+	});
+	var sum = svcs.reduce(function(a, x) { return a + Number(x.count); }, 0);
+	var pct = max > 0 ? Math.min(100, cnt * 100 / max) : 0;
+
+	var bars = '', keys = '';
+	svcs.forEach(function(x, i) {
+		var p = sum > 0 ? Number(x.count) * 100 / sum : 0;
+		var col = svcColor(x.name, i);
+		bars += '<i style="width:' + p.toFixed(2) + '%;background:' + col + '"></i>';
+		keys += '<span class="nv-key"><i style="background:' + col + '"></i>' +
+			'<em title="' + esc(x.name) + '">' + esc(x.name) + '</em>' +
+			'<b>' + (p >= 10 ? Math.round(p) : p.toFixed(1)) + '%</b></span>';
+	});
+
+	/* 占用率换色卡在内核开始丢包的位置，而不是"条看起来满了"的位置：
+	 * nf_conntrack 撑满会直接 dmesg 报 table full 并丢包。 */
+	var lvl = pct >= 85 ? '#dc2626' : (pct >= 60 ? '#d97706' : '#16a34a');
+
+	var html = '<div class="nv-conn-hd"><b>连接概况</b><span>' +
+		'conntrack 实时占用 · 按远程端口归类' +
+		'</span></div><div class="nv-conn-body">';
+
+	html += '<div class="nv-gauge">' +
+		'<div class="nv-gauge-n">' + fmtInt(cnt) +
+			(max > 0 ? '<i>/ ' + fmtInt(max) + '</i>' : '') + '</div>';
+	if (max > 0)
+		html += '<div class="nv-track"><i style="width:' + pct.toFixed(1) +
+			'%;background:' + lvl + '"></i></div>';
+	html += '<div class="nv-gauge-s">' +
+		(max > 0 ? '连接跟踪表占用 ' + pct.toFixed(1) + '%'
+		         : '读不到连接表上限') +
+		'</div></div>';
+
+	if (sum > 0)
+		html += '<div class="nv-dist"><div class="nv-stack">' + bars +
+			'</div><div class="nv-keys">' + keys + '</div></div>';
+	else
+		html += '<div class="nv-dist"><div class="nv-gauge-s">' +
+			'暂时没有可归类的连接' +
+			'</div></div>';
+
+	return html + '</div>';
+}
 
 function roleBadge(it) {
 	var r = it.role;
@@ -843,6 +972,7 @@ return view.extend({
 		var chartBox = E('div', { 'class': 'nv-chartwrap' });
 		var nowBox = E('div', { 'class': 'nv-now' });
 		var sideBox = E('div', { 'class': 'nv-side' });
+		var connBox = E('div', { 'class': 'nv-card nv-conn' });
 		var ifBox = E('div', { 'class': 'nv-tablewrap' });
 		var devBox = E('div', { 'class': 'nv-tablewrap' });
 
@@ -862,13 +992,16 @@ return view.extend({
 				])
 			]),
 			E('div', { 'class': 'nv-hero' }, [
-				E('div', { 'class': 'nv-card nv-chartcard' }, [
-					E('div', { 'class': 'nv-chart-hd' }, [
-						E('span', { 'class': 'nv-chart-title' }, '流量统计'),
-						legend,
-						nowBox
+				E('div', { 'class': 'nv-col' }, [
+					E('div', { 'class': 'nv-card nv-chartcard' }, [
+						E('div', { 'class': 'nv-chart-hd' }, [
+							E('span', { 'class': 'nv-chart-title' }, '流量统计'),
+							legend,
+							nowBox
+						]),
+						chartBox
 					]),
-					chartBox
+					connBox
 				]),
 				sideBox
 			]),
@@ -891,7 +1024,8 @@ return view.extend({
 		function refresh() {
 			return Promise.all([
 				callInterfaces().catch(function() { return null; }),
-				callDevices().catch(function() { return null; })
+				callDevices().catch(function() { return null; }),
+				callSessions().catch(function() { return null; })
 			]).then(function(res) {
 				var d = res[0];
 
@@ -920,6 +1054,8 @@ return view.extend({
 					ifBox.innerHTML = '<div class="nv-empty">无法从路由器读取接口数据</div>';
 				}
 
+				/* 独立于接口数据：conntrack 读不到也不该把整列拖黑 */
+				connBox.innerHTML = connHtml(res[2]);
 				renderDevices(devBox, res[1]);
 			});
 		}

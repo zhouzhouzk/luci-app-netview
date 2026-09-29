@@ -28,7 +28,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-netview
-PKG_VERSION:=1.4.0
+PKG_VERSION:=1.4.1
 PKG_RELEASE:=1
 
 PKG_LICENSE:=Apache-2.0

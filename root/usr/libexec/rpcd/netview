@@ -2,11 +2,12 @@
 #
 # luci-app-netview -- rpcd backend
 #
-# Exposes ubus object "netview" with three methods:
+# Exposes ubus object "netview" with four methods:
 #   interfaces  -> per-interface realtime rx/tx rate + lifetime counters,
 #                  plus WAN addressing details and the connected-client count
 #   devices     -> per-LAN-client traffic aggregated from nf_conntrack,
 #                  with the device MAC and a user-editable alias
+#   sessions    -> connection table occupancy + remote-port breakdown
 #   set_alias   -> set / clear a per-MAC device alias (stored in UCI)
 #
 # Target: ImmortalWrt / OpenWrt 21.02 .. 24.10  (developed for 24.10 x86/64)
@@ -23,12 +24,15 @@ TMP_RAW="$WORKDIR/dev.raw"
 TMP_DEV="$WORKDIR/dev.diff"
 TMP_ALIAS="$WORKDIR/alias.list"
 TMP_MERGE="$WORKDIR/names.merge"
+TMP_PORT="$WORKDIR/svc.list"
 
 # Paths as variables so the test sandbox can aim them at a fake tree.
+CT_SYS="/proc/sys/net/netfilter"
 CT_TABLE="/proc/net/nf_conntrack"
 CT_TABLE_ALT="/proc/net/ip_conntrack"
 DHCP_LEASES="/tmp/dhcp.leases"
 ARP_FILE="/proc/net/arp"
+UCI_CFG="/etc/config/netview"
 
 mkdir -p "$WORKDIR"
 
@@ -200,6 +204,100 @@ rpc_req() {
 	case "$s" in
 		*'{'*) printf '%s' "$s" ;;
 	esac
+}
+
+# -------------------------------------------------------------- conntrack ---
+
+# "<count> <max>" for the connection table, zeros when nf_conntrack is absent.
+ct_limits() {
+	local c m
+	c=$(cat "$CT_SYS/nf_conntrack_count" 2>/dev/null)
+	m=$(cat "$CT_SYS/nf_conntrack_max" 2>/dev/null)
+	case "$c" in ''|*[!0-9]*) c=0 ;; esac
+	case "$m" in ''|*[!0-9]*) m=0 ;; esac
+	printf '%s %s' "$c" "$m"
+}
+
+# Aggregate a conntrack table into "<service>\t<count>" lines: the top N, then
+# everything else merged into 其他.
+#
+# Only the *first* dport is read, because the original tuple always points at
+# whichever endpoint the packet was addressed to: outbound that is the remote
+# service port; inbound -- including anything arriving through a port-forward --
+# it is the local one. Either way it answers "what was being reached", which is
+# what this panel is for. The reply tuple's dport is the client's ephemeral
+# port and carries no information here.
+ct_ports() {
+	local table="$1"
+	[ -r "$table" ] || return 0
+	awk '
+	function svc(p, pr) {
+		if (p == 443) return (pr == "udp") ? "QUIC" : "HTTPS"
+		if (p == 80 || p == 8080) return "HTTP"
+		if (p == 53) return "DNS"
+		if (p == 853) return "DoT"
+		if (p == 123) return "NTP"
+		if (p == 22) return "SSH"
+		if (p == 51820) return "WireGuard"
+		if (p == 3478) return "STUN"
+		if (p == 5353) return "mDNS"
+		if (p == 1900) return "SSDP"
+		if (p == 67 || p == 68) return "DHCP"
+		if (p == 465 || p == 587 || p == 993 || p == 995) return "邮件"
+		return "其他"
+	}
+	# /proc/net/ip_conntrack has no leading "ipv4" column, so the protocol name
+	# is looked up among the fields instead of assumed to sit at $3.
+	/^ipv6/ { next }
+	/src=/ {
+		port = ""; pr = ""
+		for (i = 1; i <= NF; i++) {
+			v = $i
+			if (pr == "" && v ~ /^(tcp|udp|sctp|dccp)$/) pr = v
+			else if (port == "" && v ~ /^dport=/) port = substr(v, 7)
+		}
+		# ICMP and friends carry no port at all; they are still connections.
+		cnt[svc(port, pr)]++
+	}
+	END {
+		for (k in cnt) printf "%s\t%d\n", k, cnt[k]
+	}
+	' "$table" | top_list 5
+}
+
+# "<name>\t<count>" lines -> the top N by count, everything else merged into
+# 其他, which is always emitted last so the stacked bar has a stable tail.
+#
+# Selection sort on purpose: the number of distinct names is tiny (services, or
+# app categories) so O(n^2) is irrelevant, and it avoids relying on sort(1).
+top_list() {
+	local top="${1:-5}"
+	awk -v top="$top" '
+		BEGIN { FS = "\t" }
+		{ sum[$1] += $2 + 0 }
+		END {
+			# 其他 is a bucket, not a member: keep it out of the ranking and
+			# fold the tail into whatever it already held.
+			rest = 0
+			if ("其他" in sum) {
+				rest = sum["其他"]
+				delete sum["其他"]
+			}
+			n = 0
+			for (k in sum) { n++; key[n] = k; val[n] = sum[k] }
+			for (i = 1; i <= n; i++) {
+				m = i
+				for (j = i + 1; j <= n; j++) if (val[j] > val[m]) m = j
+				if (m != i) {
+					t = val[i]; val[i] = val[m]; val[m] = t
+					t = key[i]; key[i] = key[m]; key[m] = t
+				}
+			}
+			for (i = top + 1; i <= n; i++) rest += val[i]
+			for (i = 1; i <= n && i <= top; i++) printf "%s\t%d\n", key[i], val[i]
+			if (rest > 0) printf "其他\t%d\n", rest
+		}
+	'
 }
 
 # ------------------------------------------------------------- interfaces ---
@@ -562,18 +660,26 @@ do_set_alias() {
 	sid=$(alias_sid "$mac")
 	rc=0
 	uci_err=""
+	# uci set/delete 拒绝不存在的配置文件，先补一个空的。这里必须用 true 而
+	# 不是 ":"：POSIX 模式下特殊内建的重定向失败会让整个 shell 退出，前端就
+	# 只能看到一个空回复。也绝不能用 uci -q —— 它会把 stderr 一起吞掉，出错
+	# 了只剩"未知原因"。
+	if [ ! -f "$UCI_CFG" ]; then
+		mkdir -p "${UCI_CFG%/*}"
+		true > "$UCI_CFG" 2>/dev/null
+	fi
 	if [ -n "$name" ]; then
 		# The assignment's exit code is read immediately (rc=$?), before any
 		# other statement can clobber $? -- a missing interim read here would
 		# swallow uci failures and make a failed save report success.
-		uci_err=$(uci -q set "netview.$sid=alias" 2>&1 &&
-			uci -q set "netview.$sid.mac=$mac" 2>&1 &&
-			uci -q set "netview.$sid.name=$name" 2>&1 &&
-			uci -q commit netview 2>&1)
+		uci_err=$(uci set "netview.$sid=alias" 2>&1 &&
+			uci set "netview.$sid.mac=$mac" 2>&1 &&
+			uci set "netview.$sid.name=$name" 2>&1 &&
+			uci commit netview 2>&1)
 		rc=$?
 		action="set"
 	else
-		uci_err=$(uci -q delete "netview.$sid" 2>&1; uci -q commit netview 2>&1)
+		uci_err=$(uci delete "netview.$sid" 2>&1; uci commit netview 2>&1)
 		rc=$?
 		action="clear"
 	fi
@@ -589,17 +695,56 @@ do_set_alias() {
 	json_dump
 }
 
+# --------------------------------------------------------------- sessions ---
+
+# Connection table occupancy plus a breakdown of what those connections talk to.
+#
+# Separate from `devices` on purpose: device accounting needs conntrack byte
+# counters, which are off unless accounting is enabled, while the occupancy and
+# the port breakdown are available either way. Folding them together would make
+# the whole panel disappear on routers that disable acct to save memory.
+do_sessions() {
+	local now ct lim cc cm
+	now=$(date +%s)
+
+	lim=$(ct_limits)
+	cc="${lim%% *}"
+	cm="${lim##* }"
+
+	ct="$CT_TABLE"
+	[ -r "$ct" ] || ct="$CT_TABLE_ALT"
+	: > "$TMP_PORT"
+	ct_ports "$ct" > "$TMP_PORT"
+
+	json_init
+	json_add_int "timestamp" "$now"
+	json_add_int "count" "$cc"
+	json_add_int "max"   "$cm"
+	json_add_string "source" "port"
+	json_add_array "services"
+	while IFS="$(printf '\t')" read -r name n; do
+		[ -n "$name" ] || continue
+		json_add_object
+		json_add_string "name"  "$name"
+		json_add_int    "count" "$n"
+		json_close_object
+	done < "$TMP_PORT"
+	json_close_array
+	json_dump
+}
+
 # ------------------------------------------------------------------ entry ---
 
 case "$1" in
 	list)
-		echo '{ "interfaces": {}, "devices": {},'
+		echo '{ "interfaces": {}, "devices": {}, "sessions": {},'
 		echo '  "set_alias": { "mac": "string", "name": "string" } }'
 		;;
 	call)
 		case "$2" in
 			interfaces) do_interfaces ;;
 			devices)    do_devices ;;
+			sessions)   do_sessions ;;
 			set_alias)  do_set_alias ;;
 			*)          echo '{}' ;;
 		esac

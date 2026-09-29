@@ -16,7 +16,7 @@ src = src.replace('return view.extend(', 'view.extend(');
 
 const EXPORT = '\n;return { sideHtml, ifTableHtml, chartSvg, sparkSvg, aggregate,' +
 	' renderDevices, fmtBytes, fmtRate, fmtDuration, fmtProto, fmtSpeed, CSS,' +
-	' truthy, niceMax, smoothPath };\n';
+	' truthy, niceMax, smoothPath, connHtml, fmtInt, svcColor, SVC_COLORS, SVC_REST };\n';
 
 const viewStub = { extend: (o) => o };
 const rpcStub  = { declare: () => () => Promise.resolve(null) };
@@ -255,7 +255,42 @@ check('无 WAN 时退化为全部接口', agg.d === 0 && agg.scope === '全部�
 check('空列表不抛错', API.aggregate([]).scope === '全部接口');
 check('null 不抛错', API.aggregate(null).d === 0);
 
-/* ------------------------------------------------------ 6. device table --- */
+/* ------------------------------------------------------- 5.5 connection --- */
+
+console.log('\n=== 连接概况 ===');
+html = API.connHtml({ count: 187234, max: 262144, source: 'port', services: [
+	{ name: 'HTTPS', count: 812 }, { name: 'QUIC', count: 431 },
+	{ name: 'DNS', count: 129 }, { name: '其他', count: 210 }
+]});
+check('含标题与副标题', html.includes('连接概况') && html.includes('按远程端口归类'));
+check('连接数带千分位', html.includes('187,234') && html.includes('262,144'));
+check('占用条与百分比', html.includes('nv-track') && html.includes('71.4%'));
+check('堆叠条与图例', html.includes('nv-stack') && html.includes('nv-key'));
+check('其他段用灰色', html.includes(API.SVC_COLORS[0]) && html.includes(API.SVC_REST));
+check('无 NaN/undefined 泄漏', dirty(html) === null, dirty(html));
+
+/* 占用率换色：60% / 85% 是内核开始吃紧的阈值 */
+check('占用 <60% 绿', API.connHtml({ count: 50, max: 100, services: [{ name: 'HTTPS', count: 50 }] }).includes('#16a34a'));
+check('占用 60-85% 橙', API.connHtml({ count: 70, max: 100, services: [{ name: 'HTTPS', count: 50 }] }).includes('#d97706'));
+check('占用 >85% 红', API.connHtml({ count: 90, max: 100, services: [{ name: 'HTTPS', count: 50 }] }).includes('#dc2626'));
+
+html = API.connHtml(null);
+check('null 数据给后端缺失提示', html.includes('kmod-nf-conntrack'));
+check('null 无 NaN/undefined 泄漏', dirty(html) === null, dirty(html));
+html = API.connHtml({ count: 5, max: 100, services: [] });
+check('空服务给暂无连接提示', html.includes('暂时没有可归类的连接'));
+html = API.connHtml({ count: 5, max: 0, services: [{ name: 'HTTPS', count: 5 }] });
+check('无上限时不出占用条', !html.includes('nv-track'), html);
+check('无 NaN/undefined 泄漏', dirty(html) === null, dirty(html));
+
+check('fmtInt 0', API.fmtInt(0) === '0');
+check('fmtInt 187234', API.fmtInt(187234) === '187,234');
+check('fmtInt 负数', API.fmtInt(-1234) === '-1,234');
+check('fmtInt undefined', API.fmtInt(undefined) === '0');
+check('svcColor 其他恒灰', API.svcColor('其他', 0) === '#64748b');
+check('svcColor 超出调色板取末色', API.svcColor('X', 99) === API.SVC_COLORS[API.SVC_COLORS.length - 1]);
+
+/* ------------------------------------------------------- 6. device table --- */
 
 console.log('\n=== device table ===');
 function box() { return { innerHTML: '' }; }

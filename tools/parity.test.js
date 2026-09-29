@@ -149,16 +149,18 @@ if (!fs.existsSync(HARNESS)) {
 function loadViewApi(src) {
 	let s = src.replace(/^'require [^']*';$/gm, '');
 	s = s.replace('return view.extend(', 'view.extend(');
-	const EXPORT = '\n;return { sideHtml, ifTableHtml, chartSvg, sparkSvg, aggregate,' +
-		' renderDevices, fmtBytes, fmtRate, fmtDuration, fmtProto, fmtSpeed, truthy, CSS };\n';
-	const f = new Function('view', 'rpc', 'poll', 'E', s + EXPORT);
+const EXPORT = '\n;return { sideHtml, ifTableHtml, chartSvg, sparkSvg, aggregate,' +
+	' renderDevices, fmtBytes, fmtRate, fmtDuration, fmtProto, fmtSpeed, truthy,' +
+	' connHtml, fmtInt, svcColor, CSS };\n';
+const f = new Function('view', 'rpc', 'poll', 'E', s + EXPORT);
 	return f({ extend: o => o }, { declare: () => () => Promise.resolve(null) },
 	         { add: () => {}, start: () => {} }, () => ({}));
 }
 
 function loadPreviewApi(layer) {
 	const EXPORT = '\n;return { sideHtml, ifTableHtml, chartSvg, sparkSvg, aggregate,' +
-		' renderDevices, fmtBytes, fmtRate, fmtDuration, fmtProto, fmtSpeed, truthy, CSS };\n';
+		' renderDevices, fmtBytes, fmtRate, fmtDuration, fmtProto, fmtSpeed, truthy,' +
+		' connHtml, fmtInt, svcColor, CSS };\n';
 	return new Function(layer + EXPORT)();
 }
 
@@ -206,6 +208,18 @@ if (viewApi && prevApi) {
 
 	same('aggregate 一致', JSON.stringify(viewApi.aggregate(IF.interfaces)),
 		JSON.stringify(prevApi.aggregate(IF.interfaces)));
+
+	const SESS = { count: 187234, max: 262144, source: 'port', services: [
+		{ name: 'HTTPS', count: 812 }, { name: 'QUIC', count: 431 },
+		{ name: 'DNS', count: 129 }, { name: '其他', count: 210 }
+	] };
+	same('connHtml 输出一致', viewApi.connHtml(SESS), prevApi.connHtml(SESS));
+	same('connHtml 输出一致（null）', viewApi.connHtml(null), prevApi.connHtml(null));
+	same('connHtml 输出一致（空服务）',
+		viewApi.connHtml({ count: 5, max: 100, services: [] }),
+		prevApi.connHtml({ count: 5, max: 100, services: [] }));
+	same('fmtInt 一致', [ 0, 999, 187234, -5 ].map(viewApi.fmtInt).join('|'),
+		[ 0, 999, 187234, -5 ].map(prevApi.fmtInt).join('|'));
 
 	const probes = [
 		[ '空 WAN', { interfaces: [], clients: 0, wan: 'wan', wan_info: {} } ],

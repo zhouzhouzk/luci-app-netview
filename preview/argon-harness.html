@@ -50,16 +50,19 @@
 		</div>
 
 		<div class="nv-hero">
-			<div class="nv-card nv-chartcard">
-				<div class="nv-chart-hd">
-					<span class="nv-chart-title">流量统计</span>
-					<div class="nv-legend">
-						<span class="nv-lg"><i class="nv-dn"></i>下载</span>
-						<span class="nv-lg"><i class="nv-up"></i>上传</span>
+			<div class="nv-col">
+				<div class="nv-card nv-chartcard">
+					<div class="nv-chart-hd">
+						<span class="nv-chart-title">流量统计</span>
+						<div class="nv-legend">
+							<span class="nv-lg"><i class="nv-dn"></i>下载</span>
+							<span class="nv-lg"><i class="nv-up"></i>上传</span>
+						</div>
+						<div class="nv-now" id="now"></div>
 					</div>
-					<div class="nv-now" id="now"></div>
+					<div class="nv-chartwrap" id="chart"></div>
 				</div>
-				<div class="nv-chartwrap" id="chart"></div>
+				<div class="nv-card nv-conn" id="conn"></div>
 			</div>
 			<div class="nv-side" id="side"></div>
 		</div>
@@ -103,6 +106,15 @@ var devEditing = false;      /* 编辑别名期间暂停设备表重绘，防止
 var C_DOWN = '#4a9df5';
 var C_UP   = '#8b5cf6';
 var SCALE_FLOOR = 32 * 1024;
+
+/* Palette for the connection breakdown. Fixed hues rather than theme ramps:
+ * the segments must stay distinguishable in light and dark, and each one is
+ * named in the legend directly under the bar. 其他 is the merged tail and
+ * always grey, so the bar reads the same way on every poll. All five clear
+ * 3:1 against the light card and the dark one -- they carry information, so
+ * they are held to the non-text contrast floor rather than to "looks fine". */
+var SVC_COLORS = [ '#3b82f6', '#8b5cf6', '#16a34a', '#d97706', '#db2777' ];
+var SVC_REST   = '#64748b';
 
 var heroHist = [];
 var ifHist = {};
@@ -170,7 +182,7 @@ var CSS = [
 	'.nv-live { display: inline-block; width: 6px; height: 6px; border-radius: 50%;',
 	'           background: var(--nv-ok); margin-right: 5px; vertical-align: 1px; }',
 
-	'.nv-hero { display: grid; gap: 16px; align-items: start;',
+	'.nv-hero { display: grid; gap: 16px;',
 	'           grid-template-columns: minmax(0, 1fr) 364px; }',
 	'@media (max-width: 1000px) { .nv-hero { grid-template-columns: minmax(0, 1fr); } }',
 
@@ -194,6 +206,37 @@ var CSS = [
 	'.nv-chart-empty { height: 292px; display: flex; align-items: center;',
 	'                  justify-content: center; font-size: 12.5px;',
 	'                  color: var(--nv-muted); }',
+
+	/* ---- connection overview ---- */
+	'.nv-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }',
+	'.nv-conn { flex: 1 1 auto; display: flex; flex-direction: column;',
+	'          padding: 15px 17px 16px; min-height: 148px; }',
+	'.nv-conn-hd { display: flex; align-items: baseline; flex-wrap: wrap;',
+	'              gap: 4px 10px; margin-bottom: 14px; }',
+	'.nv-conn-hd b { font-size: 13px; font-weight: 600; }',
+	'.nv-conn-hd span { font-size: 11.5px; color: var(--nv-muted); }',
+	'.nv-conn-body { flex: 1 1 auto; display: flex; align-items: center;',
+	'               gap: 26px; flex-wrap: wrap; }',
+	'.nv-gauge { flex: 0 0 172px; }',
+	'.nv-gauge-n { font-size: 25px; font-weight: 600; line-height: 1.05;',
+	'             font-variant-numeric: tabular-nums; }',
+	'.nv-gauge-n i { font-style: normal; font-size: 12px; font-weight: 400;',
+	'               color: var(--nv-muted); margin-left: 5px; }',
+	'.nv-gauge-s { margin-top: 6px; font-size: 11.5px; color: var(--nv-muted); }',
+	'.nv-conn .nv-track { height: 8px; border-radius: 4px; margin: 10px 0 0; }',
+	'.nv-dist { flex: 1 1 220px; min-width: 0; }',
+	'.nv-stack { display: flex; height: 12px; border-radius: 6px;',
+	'           overflow: hidden; background: var(--nv-bg); }',
+	'.nv-stack i { display: block; height: 100%; }',
+	'.nv-keys { display: grid; gap: 7px 20px; margin-top: 13px;',
+	'           grid-template-columns: repeat(2, minmax(0, 1fr)); }',
+	'.nv-key { display: flex; align-items: center; gap: 7px; min-width: 0;',
+	'          font-size: 11.5px; }',
+	'.nv-key i { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 2px; }',
+	'.nv-key em { font-style: normal; min-width: 0; overflow: hidden;',
+	'            text-overflow: ellipsis; white-space: nowrap; }',
+	'.nv-key b { margin-left: auto; padding-left: 6px; font-weight: 600;',
+	'           color: var(--nv-muted); font-variant-numeric: tabular-nums; }',
 
 	'.nv-side { display: flex; flex-direction: column; gap: 16px; }',
 
@@ -347,6 +390,13 @@ function fmtBytes(n) {
 	return (i === 0 ? Math.round(n) : n.toFixed(2)) + ' ' + units[i];
 }
 function fmtRate(n) { return fmtBytes(n) + '/s'; }
+
+/* Thousands separators for a plain integer count (connection table sizes run
+ * into five digits, which nobody parses at a glance without them). */
+function fmtInt(n) {
+	n = Math.round(Number(n) || 0);
+	return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
 
 function fmtDuration(sec) {
 	sec = Math.max(0, Math.floor(Number(sec) || 0));
@@ -519,6 +569,74 @@ function sparkSvg(points) {
 }
 
 /* ------------------------------------------------------------ side column --- */
+
+/* Segment colour. 其他 is the merged tail and keeps grey wherever it lands, so
+ * the bar never implies that the tail is one more named category. */
+function svcColor(name, i) {
+	if (name === '其他')
+		return SVC_REST;
+	return SVC_COLORS[Math.min(i, SVC_COLORS.length - 1)];
+}
+
+/* 连接概况：连接跟踪表的实时占用 + 这些连接都连去了哪儿。
+ *
+ * 占比单位是"连接数"，不是流量 —— 副标题会明说，免得误读。 */
+function connHtml(s) {
+	if (!s)
+		return '<div class="nv-conn-hd"><b>连接概况</b>' +
+			'<span>连接跟踪不可用</span></div>' +
+			'<div class="nv-conn-body"><div class="nv-dist">' +
+			'<div class="nv-gauge-s">后端没有返回这项数据。' +
+			'需要 <b>kmod-nf-conntrack</b>，且后端版本不低于 1.1.4。</div>' +
+			'</div></div>';
+
+	var cnt = Number(s.count) || 0;
+	var max = Number(s.max) || 0;
+	var svcs = (Array.isArray(s.services) ? s.services : []).filter(function(x) {
+		return x && x.name && Number(x.count) > 0;
+	});
+	var sum = svcs.reduce(function(a, x) { return a + Number(x.count); }, 0);
+	var pct = max > 0 ? Math.min(100, cnt * 100 / max) : 0;
+
+	var bars = '', keys = '';
+	svcs.forEach(function(x, i) {
+		var p = sum > 0 ? Number(x.count) * 100 / sum : 0;
+		var col = svcColor(x.name, i);
+		bars += '<i style="width:' + p.toFixed(2) + '%;background:' + col + '"></i>';
+		keys += '<span class="nv-key"><i style="background:' + col + '"></i>' +
+			'<em title="' + esc(x.name) + '">' + esc(x.name) + '</em>' +
+			'<b>' + (p >= 10 ? Math.round(p) : p.toFixed(1)) + '%</b></span>';
+	});
+
+	/* 占用率换色卡在内核开始丢包的位置，而不是"条看起来满了"的位置：
+	 * nf_conntrack 撑满会直接 dmesg 报 table full 并丢包。 */
+	var lvl = pct >= 85 ? '#dc2626' : (pct >= 60 ? '#d97706' : '#16a34a');
+
+	var html = '<div class="nv-conn-hd"><b>连接概况</b><span>' +
+		'conntrack 实时占用 · 按远程端口归类' +
+		'</span></div><div class="nv-conn-body">';
+
+	html += '<div class="nv-gauge">' +
+		'<div class="nv-gauge-n">' + fmtInt(cnt) +
+			(max > 0 ? '<i>/ ' + fmtInt(max) + '</i>' : '') + '</div>';
+	if (max > 0)
+		html += '<div class="nv-track"><i style="width:' + pct.toFixed(1) +
+			'%;background:' + lvl + '"></i></div>';
+	html += '<div class="nv-gauge-s">' +
+		(max > 0 ? '连接跟踪表占用 ' + pct.toFixed(1) + '%'
+		         : '读不到连接表上限') +
+		'</div></div>';
+
+	if (sum > 0)
+		html += '<div class="nv-dist"><div class="nv-stack">' + bars +
+			'</div><div class="nv-keys">' + keys + '</div></div>';
+	else
+		html += '<div class="nv-dist"><div class="nv-gauge-s">' +
+			'暂时没有可归类的连接' +
+			'</div></div>';
+
+	return html + '</div>';
+}
 
 function roleBadge(it) {
 	var r = it.role;
@@ -798,6 +916,7 @@ var el = {
 	chart: document.getElementById('chart'),
 	now:   document.getElementById('now'),
 	side:  document.getElementById('side'),
+	conn:  document.getElementById('conn'),
 	iftab: document.getElementById('iftab'),
 	devtab:document.getElementById('devtab')
 };
@@ -926,6 +1045,16 @@ var WAN_INFO = {
 	gateway: '100.64.0.1', dns: '192.168.9.1 223.5.5.5', dns_auto: true
 };
 
+/* 连接概况模拟：占用从 55% 缓慢漂移，服务分布的相位也逐 tick 变化 */
+function sampleSessions() {
+	var base = { 'HTTPS': 820, 'QUIC': 460, 'DNS': 140, '其他': 210, 'WireGuard': 64 };
+	var cnt = Math.round(180000 + 42000 * Math.sin(tick / 40));
+	var services = Object.keys(base).map(function(name, i) {
+		return { name: name, count: Math.max(1, Math.round(base[name] * (0.75 + 0.5 * Math.abs(Math.sin(tick / 17 + i * 1.3))))) };
+	});
+	return { count: cnt, max: 262144, source: 'port', services: services };
+}
+
 function refresh() {
 	var ifaces = sampleIfaces();
 
@@ -947,6 +1076,7 @@ function refresh() {
 		wan_info: WAN_INFO, interfaces: ifaces
 	});
 	el.iftab.innerHTML = ifTableHtml({ interfaces: ifaces });
+	el.conn.innerHTML = connHtml(sampleSessions());
 	renderDevices(el.devtab, sampleDevices());
 
 	tick++;

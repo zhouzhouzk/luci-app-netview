@@ -159,6 +159,47 @@ ck "VLAN 语法解析"        "$( w4=$(addr_of eth0 4); printf '%s|%s' "${w4%%/*
 ck "空值不产生残留"       "$( w4=$(addr_of eth1 4); printf '%s|%s' "${w4%%/*}" "${w4##*/}" )" "|"
 
 echo ""
+echo "=== ct_ports（连接去哪儿了：按 original tuple 第一个 dport 归类）==="
+cat > "$SB/ct" <<'EOS'
+ipv4 2 tcp 6 120 ESTABLISHED src=192.168.9.5 dst=1.2.3.4 sport=1 dport=443 src=1.2.3.4 dst=192.168.9.5 sport=443 dport=51000 mark=0 use=1
+ipv4 2 udp 17 120 ESTABLISHED src=192.168.9.5 dst=1.2.3.4 sport=2 dport=443 src=1.2.3.4 dst=192.168.9.5 sport=443 dport=51001 mark=0 use=1
+ipv4 2 tcp 6 120 ESTABLISHED src=203.0.113.7 dst=192.168.9.6 sport=40000 dport=8080 src=192.168.9.6 dst=203.0.113.7 sport=8080 dport=40000 mark=0 use=1
+ipv6 10 udp 17 30 - src=2408::1 dst=2408::2 sport=53 dport=51002 - src=2408::2 dst=2408::1 sport=51002 dport=53 mark=0 use=1
+ipv4 2 icmp 1 10 - src=192.168.9.5 dst=8.8.8.8 - src=8.8.8.8 dst=192.168.9.5 mark=0 use=1
+ipv4 2 tcp 6 120 TIME_WAIT src=192.168.9.9 dst=1.1.1.1 sport=3 dport=22 src=1.1.1.1 dst=192.168.9.9 sport=22 dport=51003 mark=0 use=1
+EOS
+printf '%s\n' "$(ct_ports "$SB/ct")" > "$SB/ct.out"
+grep -q 'HTTPS' "$SB/ct.out" && r=1 || r=0; ck "tcp 443 -> HTTPS"        "$r" "1"
+grep -q 'QUIC'   "$SB/ct.out" && r=1 || r=0; ck "udp 443 -> QUIC"         "$r" "1"
+grep -q 'HTTP'   "$SB/ct.out" && r=1 || r=0; ck "端口转发入站取本地口 8080" "$r" "1"
+grep -q 'SSH'    "$SB/ct.out" && r=1 || r=0; ck "tcp 22 -> SSH"           "$r" "1"
+grep -q 'DNS'    "$SB/ct.out" && r=1 || r=0; ck "IPv6 行被跳过（无 DNS）"  "$r" "0"
+grep -q '其他'    "$SB/ct.out" && r=1 || r=0; ck "icmp 无端口 -> 其他"      "$r" "1"
+
+echo ""
+echo "=== top_list（Top N + 尾部并入 其他，其他 恒排最后）==="
+printf 'A\t5\nB\t3\nC\t1\n其他\t2\n' | top_list 2 > "$SB/tl.out"
+ck "Top2 = A,B，尾部并入其他" "$(awk '{printf "%s%s", (NR>1?",":""), $1}' "$SB/tl.out")" "A,B,其他"
+ck "其他 数值为 3"             "$(grep '^其他' "$SB/tl.out" | cut -f2)" "3"
+printf 'A\t1\n' | top_list 5 > "$SB/tl2.out"
+ck "不足 N 时不产生其他行"     "$(wc -l < "$SB/tl2.out" | tr -d ' ')" "1"
+
+echo ""
+echo "=== ct_limits（count/max 缺失或非数字时回 0）==="
+CT_SYS_BAK="$CT_SYS"
+CT_SYS="$SB/does-not-exist"
+ck "目录不存在回 0 0"      "$(ct_limits)" "0 0"
+mkdir -p "$SB/ctsys"
+CT_SYS="$SB/ctsys"
+printf '187234\n' > "$SB/ctsys/nf_conntrack_count"
+printf '262144\n' > "$SB/ctsys/nf_conntrack_max"
+ck "正常读取 count/max"    "$(ct_limits)" "187234 262144"
+printf 'x\n' > "$SB/ctsys/nf_conntrack_count"
+printf '\n'  > "$SB/ctsys/nf_conntrack_max"
+ck "非数字回 0"            "$(ct_limits)" "0 0"
+CT_SYS="$CT_SYS_BAK"
+
+echo ""
 echo "======================================"
 printf '  pass %s   fail %s\n' "$pass" "$fail"
 echo "======================================"
