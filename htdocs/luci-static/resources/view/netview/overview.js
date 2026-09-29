@@ -42,9 +42,16 @@ var callDevices = rpc.declare({
 	method: 'devices'
 });
 
+var callSetAlias = rpc.declare({
+	object: 'netview',
+	method: 'set_alias',
+	params: [ 'mac', 'name' ]
+});
+
 var POLL_INTERVAL = 3;
 var MAXPOINTS = 60;          /* 60 * 3 s = 3 minutes */
 var MAX_DEVICES = 20;
+var devEditing = false;      /* 编辑别名期间暂停设备表重绘，防止轮询打断输入 */
 
 /* iStoreOS-inspired data colours. Deliberately fixed rather than derived from
  * the theme accent: they identify the two series across light and dark. */
@@ -232,6 +239,28 @@ var CSS = [
 	'.nv-ifname { font-weight: 600; }',
 	'.nv-devname { font-weight: 600; }',
 	'.nv-devip { color: var(--nv-muted); font-variant-numeric: tabular-nums; }',
+	'.nv-mac { color: var(--nv-muted); font-variant-numeric: tabular-nums;',
+	'          font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;',
+	'          font-size: 11px; letter-spacing: .02em; white-space: nowrap; }',
+	'.nv-alias { white-space: nowrap; }',
+	'.nv-alias-chip { display: inline-block; max-width: 160px; overflow: hidden;',
+	'                text-overflow: ellipsis; vertical-align: middle;',
+	'                color: var(--nv-text); font-weight: 600; }',
+	'.nv-alias-none { color: var(--nv-muted); }',
+	'.nv-edit { display: inline-block; cursor: pointer; border: 0; background: none;',
+	'           color: var(--nv-muted); padding: 5px 8px; margin-left: 4px;',
+	'           border-radius: 7px; line-height: 1; vertical-align: middle;',
+	'           transition: color .15s ease, background .15s ease; }',
+	'.nv-edit:hover { color: var(--nv-text); background: var(--nv-bg); }',
+	'.nv-edit svg { display: block; }',
+	'.nv-alias-in { width: 150px; padding: 5px 8px; font: inherit; font-size: 12.5px;',
+	'               color: var(--nv-text); background: var(--nv-bg);',
+	'               border: 1px solid var(--nv-border); border-radius: 7px; }',
+	'.nv-save, .nv-cancel { cursor: pointer; font: inherit; font-size: 12px;',
+	'                       padding: 5px 10px; margin-left: 5px; border-radius: 7px;',
+	'                       border: 1px solid var(--nv-border); }',
+	'.nv-save { background: var(--nv-dn); border-color: var(--nv-dn); color: #fff; }',
+	'.nv-cancel { background: none; color: var(--nv-muted); }',
 
 	'.nv-badge { display: inline-block; margin-left: 7px; padding: 1px 7px;',
 	'            border-radius: 999px; font-size: 10px; font-weight: 600;',
@@ -278,7 +307,10 @@ var ICON = {
 		' stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' +
 		'<rect x="2.5" y="6" width="19" height="12" rx="2.2"/>' +
 		'<path d="M6.6 10v4"/><path d="M9.6 10v4"/>' +
-		'<rect x="14" y="9.8" width="4.6" height="4.4" rx="1.1"/></svg>'
+		'<rect x="14" y="9.8" width="4.6" height="4.4" rx="1.1"/></svg>',
+	pencil: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"' +
+		' stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+		'<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>'
 };
 
 /* ------------------------------------------------------------- formatting --- */
@@ -647,6 +679,10 @@ function ifTableHtml(d) {
 /* ------------------------------------------------------------ device table --- */
 
 function renderDevices(box, data) {
+	/* 编辑别名时轮询仍在跑，若照常重绘会把手里的输入框整个换掉（半截名字
+	 * 被覆盖、焦点丢失）。编辑期间直接跳过重绘，等保存/取消后再恢复。 */
+	if (devEditing) return;
+
 	if (!data) {
 		box.innerHTML = '<div class="nv-empty">无法读取设备数据</div>';
 		return;
@@ -682,7 +718,7 @@ function renderDevices(box, data) {
 	var max = (list[0].down + list[0].up) || 1;
 
 	var html = '<table class="nv-table"><thead><tr>' +
-		'<th>设备</th><th>IP</th>' +
+		'<th>设备</th><th>别名</th><th>MAC</th><th>IP</th>' +
 		'<th class="nv-th-r">下行</th><th class="nv-th-r">上行</th>' +
 		'<th>累计流量</th><th class="nv-th-r">连接数</th>' +
 	'</tr></thead><tbody>';
@@ -693,6 +729,8 @@ function renderDevices(box, data) {
 
 		html += '<tr>' +
 			'<td class="nv-devname">' + esc(d.host && d.host !== '-' ? d.host : '未知设备') + '</td>' +
+			'<td class="nv-alias">' + aliasCellHtml(d) + '</td>' +
+			'<td class="nv-mac">' + (d.mac && d.mac !== '-' ? esc(d.mac) : '—') + '</td>' +
 			'<td class="nv-devip">' + esc(d.ip) + '</td>' +
 			'<td class="nv-num nv-dn nv-r">' + fmtRate(d.down_rate) + '</td>' +
 			'<td class="nv-num nv-up nv-r">' + fmtRate(d.up_rate) + '</td>' +
@@ -705,6 +743,81 @@ function renderDevices(box, data) {
 	});
 
 	box.innerHTML = html + '</tbody></table>';
+}
+
+/* 别名列：设备名只读，别名是独立一列、按 MAC 归属到设备。没有 MAC 的条目
+ * （静态 IP 且 ARP 没回完整条目）无法定位别名，就只显示一个破折号。 */
+function aliasCellHtml(d) {
+	var alias = d.alias || '';
+	var mac = d.mac || '';
+	if (!mac || mac === '-')
+		return '<span class="nv-alias-none">—</span>';
+	var label = alias
+		? '<span class="nv-alias-chip" title="' + esc(alias) + '">' + esc(alias) + '</span>'
+		: '<span class="nv-alias-none">未设置</span>';
+	return label +
+		'<button type="button" class="nv-edit" data-mac="' + esc(mac) +
+			'" data-alias="' + esc(alias) + '" aria-label="编辑别名">' + ICON.pencil + '</button>';
+}
+
+function startAliasEdit(btn) {
+	var td = btn.parentNode;
+	var mac = btn.getAttribute('data-mac') || '';
+	var orig = btn.getAttribute('data-alias') || '';
+	devEditing = true;
+	td.innerHTML =
+		'<input class="nv-alias-in" type="text" maxlength="64" value="' + esc(orig) + '"' +
+			' data-mac="' + esc(mac) + '" data-orig="' + esc(orig) + '">' +
+		'<button type="button" class="nv-save">保存</button>' +
+		'<button type="button" class="nv-cancel">取消</button>';
+	var inp = td.querySelector('.nv-alias-in');
+	if (inp) inp.focus();
+}
+
+function commitAliasEdit(btn, save) {
+	var td = btn.parentNode;
+	var inp = td.querySelector('.nv-alias-in');
+	if (!inp) { devEditing = false; return; }
+	var mac = inp.getAttribute('data-mac') || '';
+	var orig = inp.getAttribute('data-orig') || '';
+	var name = inp.value.replace(/^\s+|\s+$/g, '');
+
+	save(mac, name).then(function(res) {
+		if (res && res.ok)
+			td.innerHTML = aliasCellHtml({ alias: name, mac: mac });
+		else {
+			var why = (res && (res.detail || res.reason)) || '未知错误';
+			window.alert('保存失败：' + why);
+			td.innerHTML = aliasCellHtml({ alias: orig, mac: mac });
+		}
+		devEditing = false;
+	}, function(err) {
+		window.alert('保存失败：' + ((err && err.message) || err));
+		td.innerHTML = aliasCellHtml({ alias: orig, mac: mac });
+		devEditing = false;
+	});
+}
+
+function cancelAliasEdit(btn) {
+	var td = btn.parentNode;
+	var inp = td.querySelector('.nv-alias-in');
+	var mac = inp ? inp.getAttribute('data-mac') : '';
+	var orig = inp ? inp.getAttribute('data-orig') : '';
+	td.innerHTML = aliasCellHtml({ alias: orig, mac: mac });
+	devEditing = false;
+}
+
+/* 事件委托挂在容器上，按钮在 renderDevices 换 innerHTML 后依然命中。 */
+function bindDeviceEdits(box, save) {
+	if (!box || typeof box.addEventListener !== 'function') return;
+	box.addEventListener('click', function(ev) {
+		var t = ev.target;
+		var btn = t && t.closest ? t.closest('button') : null;
+		if (!btn) return;
+		if (btn.classList.contains('nv-edit')) startAliasEdit(btn);
+		else if (btn.classList.contains('nv-save')) commitAliasEdit(btn, save);
+		else if (btn.classList.contains('nv-cancel')) cancelAliasEdit(btn);
+	});
 }
 
 /* ------------------------------------------------------------------- view --- */
@@ -810,6 +923,8 @@ return view.extend({
 				renderDevices(devBox, res[1]);
 			});
 		}
+
+		bindDeviceEdits(devBox, callSetAlias);
 
 		refresh();
 		poll.add(refresh, POLL_INTERVAL);

@@ -5,6 +5,11 @@
 			"ubus": {
 				"netview": [ "interfaces", "devices" ]
 			}
+		},
+		"write": {
+			"ubus": {
+				"netview": [ "set_alias" ]
+			}
 		}
 	}
 }

@@ -262,11 +262,18 @@ function box() { return { innerHTML: '' }; }
 
 let b = box();
 API.renderDevices(b, { devices: [
-	{ ip: '192.168.1.101', host: 'desktop.lan', down: 5000000, up: 900000, down_rate: 4096, up_rate: 512, conns: 7 },
-	{ ip: '192.168.1.102', host: '-',           down: 600,     up: 450,    down_rate: 0,    up_rate: 0,   conns: 1 }
+	{ ip: '192.168.1.101', host: 'desktop.lan', mac: 'aa:bb:cc:dd:ee:01', alias: '书房台式机',
+	  down: 5000000, up: 900000, down_rate: 4096, up_rate: 512, conns: 7 },
+	{ ip: '192.168.1.102', host: '-',           mac: '-',                 alias: '',
+	  down: 600,     up: 450,    down_rate: 0,    up_rate: 0,   conns: 1 }
 ]});
 check('渲染表格', b.innerHTML.includes('desktop.lan'));
 check('未知设备占位', b.innerHTML.includes('未知设备'));
+check('显示 MAC 列', b.innerHTML.includes('aa:bb:cc:dd:ee:01'));
+check('显示别名列', b.innerHTML.includes('书房台式机'));
+check('别名列带编辑按钮', b.innerHTML.includes('class="nv-edit"') && b.innerHTML.includes('编辑别名'));
+check('无 MAC 设备不出现编辑按钮', (b.innerHTML.match(/class="nv-edit"/g) || []).length === 1);
+check('无 MAC 设备别名列显示占位', b.innerHTML.includes('nv-alias-none">—'));
 check('无 NaN/undefined 泄漏', dirty(b.innerHTML) === null, dirty(b.innerHTML));
 
 b = box(); API.renderDevices(b, { error: 'conntrack_acct_disabled' });

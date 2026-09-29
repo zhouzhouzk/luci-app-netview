@@ -98,6 +98,7 @@
 var POLL_INTERVAL = 3;
 var MAXPOINTS = 60;
 var MAX_DEVICES = 20;
+var devEditing = false;      /* 编辑别名期间暂停设备表重绘，防止轮询打断输入 */
 
 var C_DOWN = '#4a9df5';
 var C_UP   = '#8b5cf6';
@@ -261,6 +262,28 @@ var CSS = [
 	'.nv-ifname { font-weight: 600; }',
 	'.nv-devname { font-weight: 600; }',
 	'.nv-devip { color: var(--nv-muted); font-variant-numeric: tabular-nums; }',
+	'.nv-mac { color: var(--nv-muted); font-variant-numeric: tabular-nums;',
+	'          font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;',
+	'          font-size: 11px; letter-spacing: .02em; white-space: nowrap; }',
+	'.nv-alias { white-space: nowrap; }',
+	'.nv-alias-chip { display: inline-block; max-width: 160px; overflow: hidden;',
+	'                text-overflow: ellipsis; vertical-align: middle;',
+	'                color: var(--nv-text); font-weight: 600; }',
+	'.nv-alias-none { color: var(--nv-muted); }',
+	'.nv-edit { display: inline-block; cursor: pointer; border: 0; background: none;',
+	'           color: var(--nv-muted); padding: 5px 8px; margin-left: 4px;',
+	'           border-radius: 7px; line-height: 1; vertical-align: middle;',
+	'           transition: color .15s ease, background .15s ease; }',
+	'.nv-edit:hover { color: var(--nv-text); background: var(--nv-bg); }',
+	'.nv-edit svg { display: block; }',
+	'.nv-alias-in { width: 150px; padding: 5px 8px; font: inherit; font-size: 12.5px;',
+	'               color: var(--nv-text); background: var(--nv-bg);',
+	'               border: 1px solid var(--nv-border); border-radius: 7px; }',
+	'.nv-save, .nv-cancel { cursor: pointer; font: inherit; font-size: 12px;',
+	'                       padding: 5px 10px; margin-left: 5px; border-radius: 7px;',
+	'                       border: 1px solid var(--nv-border); }',
+	'.nv-save { background: var(--nv-dn); border-color: var(--nv-dn); color: #fff; }',
+	'.nv-cancel { background: none; color: var(--nv-muted); }',
 
 	'.nv-badge { display: inline-block; margin-left: 7px; padding: 1px 7px;',
 	'            border-radius: 999px; font-size: 10px; font-weight: 600;',
@@ -307,7 +330,10 @@ var ICON = {
 		' stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' +
 		'<rect x="2.5" y="6" width="19" height="12" rx="2.2"/>' +
 		'<path d="M6.6 10v4"/><path d="M9.6 10v4"/>' +
-		'<rect x="14" y="9.8" width="4.6" height="4.4" rx="1.1"/></svg>'
+		'<rect x="14" y="9.8" width="4.6" height="4.4" rx="1.1"/></svg>',
+	pencil: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"' +
+		' stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+		'<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>'
 };
 
 /* ------------------------------------------------------------- formatting --- */
@@ -618,12 +644,20 @@ function ifTableHtml(d) {
 /* ------------------------------------------------------------ device table --- */
 
 function renderDevices(box, data) {
-	if (!data) { box.innerHTML = '<div class="nv-empty">无法读取设备数据</div>'; return; }
+	/* 编辑别名时轮询仍在跑，若照常重绘会把手里的输入框整个换掉（半截名字
+	 * 被覆盖、焦点丢失）。编辑期间直接跳过重绘，等保存/取消后再恢复。 */
+	if (devEditing) return;
+
+	if (!data) {
+		box.innerHTML = '<div class="nv-empty">无法读取设备数据</div>';
+		return;
+	}
 
 	if (data.error === 'conntrack_unavailable') {
 		box.innerHTML = '<div class="nv-empty">内核 conntrack 表不可用，无法统计设备流量</div>';
 		return;
 	}
+
 	if (data.error === 'conntrack_acct_disabled') {
 		box.innerHTML = '<div class="nv-empty">内核 conntrack 未开启流量记账，无法统计设备流量' +
 			'<span class="nv-hint">在路由器上执行 ' +
@@ -636,11 +670,15 @@ function renderDevices(box, data) {
 		return ((b.down + b.up) - (a.down + a.up));
 	}).slice(0, MAX_DEVICES);
 
-	if (!list.length) { box.innerHTML = '<div class="nv-empty">暂无活动的 NAT / 转发连接</div>'; return; }
+	if (!list.length) {
+		box.innerHTML = '<div class="nv-empty">暂无活动的 NAT / 转发连接</div>';
+		return;
+	}
 
 	var max = (list[0].down + list[0].up) || 1;
+
 	var html = '<table class="nv-table"><thead><tr>' +
-		'<th>设备</th><th>IP</th>' +
+		'<th>设备</th><th>别名</th><th>MAC</th><th>IP</th>' +
 		'<th class="nv-th-r">下行</th><th class="nv-th-r">上行</th>' +
 		'<th>累计流量</th><th class="nv-th-r">连接数</th>' +
 	'</tr></thead><tbody>';
@@ -648,18 +686,98 @@ function renderDevices(box, data) {
 	list.forEach(function(d) {
 		var total = d.down + d.up;
 		var pct = Math.max(3, Math.min(100, (total / max) * 100));
+
 		html += '<tr>' +
 			'<td class="nv-devname">' + esc(d.host && d.host !== '-' ? d.host : '未知设备') + '</td>' +
+			'<td class="nv-alias">' + aliasCellHtml(d) + '</td>' +
+			'<td class="nv-mac">' + (d.mac && d.mac !== '-' ? esc(d.mac) : '—') + '</td>' +
 			'<td class="nv-devip">' + esc(d.ip) + '</td>' +
 			'<td class="nv-num nv-dn nv-r">' + fmtRate(d.down_rate) + '</td>' +
 			'<td class="nv-num nv-up nv-r">' + fmtRate(d.up_rate) + '</td>' +
-			'<td style="min-width:180px"><div class="nv-track"><i style="width:' +
-				pct.toFixed(1) + '%"></i></div><span class="nv-num">' + fmtBytes(total) + '</span></td>' +
+			'<td style="min-width:180px">' +
+				'<div class="nv-track"><i style="width:' + pct.toFixed(1) + '%"></i></div>' +
+				'<span class="nv-num">' + fmtBytes(total) + '</span>' +
+			'</td>' +
 			'<td class="nv-num nv-r">' + (Number(d.conns) || 0) + '</td>' +
 		'</tr>';
 	});
 
 	box.innerHTML = html + '</tbody></table>';
+}
+
+/* 别名列：设备名只读，别名是独立一列、按 MAC 归属到设备。没有 MAC 的条目
+ * （静态 IP 且 ARP 没回完整条目）无法定位别名，就只显示一个破折号。 */
+function aliasCellHtml(d) {
+	var alias = d.alias || '';
+	var mac = d.mac || '';
+	if (!mac || mac === '-')
+		return '<span class="nv-alias-none">—</span>';
+	var label = alias
+		? '<span class="nv-alias-chip" title="' + esc(alias) + '">' + esc(alias) + '</span>'
+		: '<span class="nv-alias-none">未设置</span>';
+	return label +
+		'<button type="button" class="nv-edit" data-mac="' + esc(mac) +
+			'" data-alias="' + esc(alias) + '" aria-label="编辑别名">' + ICON.pencil + '</button>';
+}
+
+function startAliasEdit(btn) {
+	var td = btn.parentNode;
+	var mac = btn.getAttribute('data-mac') || '';
+	var orig = btn.getAttribute('data-alias') || '';
+	devEditing = true;
+	td.innerHTML =
+		'<input class="nv-alias-in" type="text" maxlength="64" value="' + esc(orig) + '"' +
+			' data-mac="' + esc(mac) + '" data-orig="' + esc(orig) + '">' +
+		'<button type="button" class="nv-save">保存</button>' +
+		'<button type="button" class="nv-cancel">取消</button>';
+	var inp = td.querySelector('.nv-alias-in');
+	if (inp) inp.focus();
+}
+
+function commitAliasEdit(btn, save) {
+	var td = btn.parentNode;
+	var inp = td.querySelector('.nv-alias-in');
+	if (!inp) { devEditing = false; return; }
+	var mac = inp.getAttribute('data-mac') || '';
+	var orig = inp.getAttribute('data-orig') || '';
+	var name = inp.value.replace(/^\s+|\s+$/g, '');
+
+	save(mac, name).then(function(res) {
+		if (res && res.ok)
+			td.innerHTML = aliasCellHtml({ alias: name, mac: mac });
+		else {
+			var why = (res && (res.detail || res.reason)) || '未知错误';
+			window.alert('保存失败：' + why);
+			td.innerHTML = aliasCellHtml({ alias: orig, mac: mac });
+		}
+		devEditing = false;
+	}, function(err) {
+		window.alert('保存失败：' + ((err && err.message) || err));
+		td.innerHTML = aliasCellHtml({ alias: orig, mac: mac });
+		devEditing = false;
+	});
+}
+
+function cancelAliasEdit(btn) {
+	var td = btn.parentNode;
+	var inp = td.querySelector('.nv-alias-in');
+	var mac = inp ? inp.getAttribute('data-mac') : '';
+	var orig = inp ? inp.getAttribute('data-orig') : '';
+	td.innerHTML = aliasCellHtml({ alias: orig, mac: mac });
+	devEditing = false;
+}
+
+/* 事件委托挂在容器上，按钮在 renderDevices 换 innerHTML 后依然命中。 */
+function bindDeviceEdits(box, save) {
+	if (!box || typeof box.addEventListener !== 'function') return;
+	box.addEventListener('click', function(ev) {
+		var t = ev.target;
+		var btn = t && t.closest ? t.closest('button') : null;
+		if (!btn) return;
+		if (btn.classList.contains('nv-edit')) startAliasEdit(btn);
+		else if (btn.classList.contains('nv-save')) commitAliasEdit(btn, save);
+		else if (btn.classList.contains('nv-cancel')) cancelAliasEdit(btn);
+	});
 }
 
 function aggregate(list) {
@@ -763,13 +881,13 @@ function sampleIfaces() {
 }
 
 var DEVICES = [
-	{ ip: '192.168.9.101', host: 'MacBook-Pro.lan',  base: [ 8.4e6, 9.1e5 ], conns: 42 },
-	{ ip: '192.168.9.102', host: 'DESKTOP-7K3.lan',  base: [ 5.1e6, 3.4e5 ], conns: 28 },
-	{ ip: '192.168.9.118', host: 'iPhone-15.lan',    base: [ 2.2e6, 1.9e5 ], conns: 17 },
-	{ ip: '192.168.9.120', host: 'nas.lan',          base: [ 1.6e6, 6.2e6 ], conns: 9 },
-	{ ip: '192.168.9.133', host: '-',                base: [ 4.1e5, 7.4e4 ], conns: 6 },
-	{ ip: '192.168.9.144', host: 'raspberrypi.lan',  base: [ 1.8e5, 3.2e4 ], conns: 4 },
-	{ ip: '192.168.9.150', host: 'TV-Box.lan',       base: [ 9.2e6, 1.1e5 ], conns: 3 }
+	{ ip: '192.168.9.101', host: 'MacBook-Pro.lan',  mac: 'aa:bb:cc:dd:ee:01', alias: '我的 MacBook', base: [ 8.4e6, 9.1e5 ], conns: 42 },
+	{ ip: '192.168.9.102', host: 'DESKTOP-7K3.lan',  mac: 'aa:bb:cc:dd:ee:02', alias: '',              base: [ 5.1e6, 3.4e5 ], conns: 28 },
+	{ ip: '192.168.9.118', host: 'iPhone-15.lan',    mac: 'aa:bb:cc:dd:ee:03', alias: '老婆的手机',     base: [ 2.2e6, 1.9e5 ], conns: 17 },
+	{ ip: '192.168.9.120', host: 'nas.lan',          mac: 'aa:bb:cc:dd:ee:04', alias: 'NAS',           base: [ 1.6e6, 6.2e6 ], conns: 9 },
+	{ ip: '192.168.9.133', host: '-',                mac: 'aa:bb:cc:dd:ee:05', alias: '',              base: [ 4.1e5, 7.4e4 ], conns: 6 },
+	{ ip: '192.168.9.144', host: 'raspberrypi.lan',  mac: '-',                 alias: '',              base: [ 1.8e5, 3.2e4 ], conns: 4 },
+	{ ip: '192.168.9.150', host: 'TV-Box.lan',       mac: 'aa:bb:cc:dd:ee:07', alias: '客厅电视',       base: [ 9.2e6, 1.1e5 ], conns: 3 }
 ];
 
 function sampleDevices() {
@@ -783,13 +901,23 @@ function sampleDevices() {
 		d.base[1] += (4.0e4 * envelope(tick, pu)) * POLL_INTERVAL;
 
 		return {
-			ip: d.ip, host: d.host,
+			ip: d.ip, host: d.host, mac: d.mac, alias: d.alias,
 			down: Math.round(d.base[0]), up: Math.round(d.base[1]),
 			down_rate: 2.4e5 * envelope(tick, pd),
 			up_rate: 3.4e4 * envelope(tick, pu),
 			conns: d.conns
 		};
 	}) };
+}
+
+/* 预览专用：把别名写回内存里的模拟设备，模拟后端 set_alias 按 MAC 归属的效果 */
+function mockSetAlias(mac, name) {
+	return Promise.resolve().then(function() {
+		for (var i = 0; i < DEVICES.length; i++) {
+			if (DEVICES[i].mac === mac) { DEVICES[i].alias = name; break; }
+		}
+		return { ok: true, action: name ? 'set' : 'clear' };
+	});
 }
 
 var WAN_INFO = {
@@ -839,6 +967,7 @@ for (var i = 0; i < MAXPOINTS; i++) {
 }
 
 refresh();
+bindDeviceEdits(el.devtab, mockSetAlias);
 setInterval(refresh, POLL_INTERVAL * 1000);
 
 </script>

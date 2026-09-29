@@ -2,10 +2,12 @@
 #
 # luci-app-netview -- rpcd backend
 #
-# Exposes ubus object "netview" with two methods:
+# Exposes ubus object "netview" with three methods:
 #   interfaces  -> per-interface realtime rx/tx rate + lifetime counters,
 #                  plus WAN addressing details and the connected-client count
-#   devices     -> per-LAN-client traffic aggregated from nf_conntrack
+#   devices     -> per-LAN-client traffic aggregated from nf_conntrack,
+#                  with the device MAC and a user-editable alias
+#   set_alias   -> set / clear a per-MAC device alias (stored in UCI)
 #
 # Target: ImmortalWrt / OpenWrt 21.02 .. 24.10  (developed for 24.10 x86/64)
 #
@@ -19,6 +21,14 @@ TMP_SNAP="$WORKDIR/if.snap"
 TMP_IF="$WORKDIR/if.diff"
 TMP_RAW="$WORKDIR/dev.raw"
 TMP_DEV="$WORKDIR/dev.diff"
+TMP_ALIAS="$WORKDIR/alias.list"
+TMP_MERGE="$WORKDIR/names.merge"
+
+# Paths as variables so the test sandbox can aim them at a fake tree.
+CT_TABLE="/proc/net/nf_conntrack"
+CT_TABLE_ALT="/proc/net/ip_conntrack"
+DHCP_LEASES="/tmp/dhcp.leases"
+ARP_FILE="/proc/net/arp"
 
 mkdir -p "$WORKDIR"
 
@@ -157,6 +167,41 @@ if_roles() {
 	printf '%s' "${out%,}"
 }
 
+# ---------------------------------------------------------- JSON snippets ---
+
+# Minimal JSON readers for the small payloads this script receives.
+
+# A JSON string escapes its own quotes, which would otherwise end a token
+# early. Only \" is unescaped: it is the only escape these replies use.
+#
+# First string value stored under <key>, or nothing. The value sits two tokens
+# after the key -- the token in between is the colon, in "k":"v" and "k": "v".
+json_str() {
+	awk -v key="$1" '
+		{
+			gsub(/\r/, "")
+			n = split($0, t, "\"")
+			for (i = 1; i <= n; i++) {
+				if (want && i == want) { print jv_unesc(t[i]); exit }
+				if (t[i] == key && t[i + 1] ~ /^[ \t]*:[ \t]*$/) want = i + 2
+			}
+		}
+		function jv_unesc(s) { gsub(/\\"/, "\"", s); return s }
+	'
+}
+
+# The ubus request payload. rpcd hands the method arguments over on stdin;
+# invoked by hand, or from the test harness, stdin is a terminal or already at
+# EOF and this yields nothing.
+rpc_req() {
+	local s
+	[ -t 0 ] && return 0
+	s=$(cat 2>/dev/null)
+	case "$s" in
+		*'{'*) printf '%s' "$s" ;;
+	esac
+}
+
 # ------------------------------------------------------------- interfaces ---
 
 do_interfaces() {
@@ -285,11 +330,12 @@ do_devices() {
 	local now leases ct
 	now=$(date +%s)
 
-	leases="/tmp/dhcp.leases"
+	leases="$DHCP_LEASES"
 	[ -f "$leases" ] || leases="/dev/null"
+	[ -r "$ARP_FILE" ] || ARP_FILE="/dev/null"
 
-	ct="/proc/net/nf_conntrack"
-	[ -r "$ct" ] || ct="/proc/net/ip_conntrack"
+	ct="$CT_TABLE"
+	[ -r "$ct" ] || ct="$CT_TABLE_ALT"
 
 	if [ ! -r "$ct" ]; then
 		json_init
@@ -325,9 +371,47 @@ do_devices() {
 		return
 	fi
 
+	# Manually maintained aliases live in /etc/config/netview as named sections
+	# keyed by MAC ("alias_aa_bb_cc_dd_ee_01" -> option mac / option name), so
+	# an edit survives reboots and a DHCP re-numbering keeps its label.
+	: > "$TMP_ALIAS"
+	if command -v uci >/dev/null 2>&1; then
+		# uci show prints  netview.<sid>.<field>='<value>'. Splitting on "="
+		# only -- MAC addresses carry colons, so a [.='] field separator would
+		# shred the value -- and stripping the surrounding quotes by hand.
+		uci -q show netview 2>/dev/null | grep -E '\.alias_[0-9a-f_]+\.(mac|name)=' | awk -F= '
+			{
+				v = $0
+				sub(/^[^=]*=/, "", v)
+				gsub(/^'"'"'|'"'"'$/, "", v)
+				k = $1; sub(/^netview\./, "", k)
+				sid = k; sub(/\.[^.]*$/, "", sid)
+				f = k; sub(/^[^.]*\./, "", f)
+				if (f == "mac")  mac[sid] = v
+				if (f == "name") nm[sid] = v
+			}
+			END { for (s in mac) if (nm[s] != "") printf "%s\t%s\n", mac[s], nm[s] }
+		' >> "$TMP_ALIAS"
+	fi
+
+	# Name / MAC / alias sources are flattened into one typed stream, so the
+	# aggregate never depends on any of them being non-empty (empty inputs would
+	# break per-file FNR counting). Line kinds: 1=alias(mac,name) 2=lease(mac,
+	# ip,name) 3=arp(ip,mac). conntrack rides in as the second awk file.
+	{
+		printf '0\n'
+		awk 'NF >= 2 { printf "1\t%s\t%s\n", $1, $2 }' "$TMP_ALIAS" 2>/dev/null
+		awk 'NF >= 4 { printf "2\t%s\t%s\t%s\n", $2, $3, $4 }' "$leases" 2>/dev/null
+		awk 'NF >= 4 && $3 == "0x2" { printf "3\t%s\t%s\n", $1, $4 }' "$ARP_FILE" 2>/dev/null
+	} > "$TMP_MERGE"
+
 	# Aggregate conntrack entries per private (LAN side) address.
 	# original tuple  = the initiating direction
 	# reply tuple     = bytes flowing back
+	#
+	# The manual alias is keyed by MAC, not IP: an address can change on a DHCP
+	# renew while the hardware address stays put, so a per-IP alias would
+	# silently re-attach to whichever box later grabs that address.
 	awk '
 	function ispriv(ip) {
 		if (ip ~ /^192\.168\./) return 1
@@ -335,8 +419,10 @@ do_devices() {
 		if (ip ~ /^172\.(1[6-9]|2[0-9]|3[01])\./) return 1
 		return 0
 	}
-	FNR == NR {
-		if (NF >= 4) { nm[$3] = $4; mc[$3] = $2 }
+	NR == FNR {
+		if ($1 == 1) { al[$2] = $3 }
+		else if ($1 == 2) { mc[$3] = $2; nm[$3] = $4 }
+		else if ($1 == 3) { if (!($2 in mc)) mc[$2] = $3 }
 		next
 	}
 	# /proc/net/nf_conntrack prefixes IPv4 lines with "ipv4", but the legacy
@@ -370,11 +456,17 @@ do_devices() {
 	}
 	END {
 		# "-" placeholder: an empty field would collapse under FS/IFS splitting
-		# and shift every following column.
-		for (ip in cn)
-			printf "%s\t%s\t%d\t%d\t%d\n", ip, (ip in nm && nm[ip] != "" ? nm[ip] : "-"), up[ip], dn[ip], cn[ip]
+		# (read skips empty middle fields) and shift every following column.
+		# host, alias and mac all fall back to "-" here; the JSON loop turns
+		# the alias "-" back into an empty string.
+		for (ip in cn) {
+			mm  = (ip in mc && mc[ip] != "") ? mc[ip] : "-"
+			nm2 = (ip in nm && nm[ip] != "") ? nm[ip] : "-"
+			al2 = (mm != "-" && (mm in al) && al[mm] != "") ? al[mm] : "-"
+			printf "%s\t%s\t%s\t%s\t%d\t%d\t%d\n", ip, nm2, al2, mm, up[ip], dn[ip], cn[ip]
+		}
 	}
-	' "$leases" "$ct" > "$TMP_RAW"
+	' "$TMP_MERGE" "$ct" > "$TMP_RAW"
 
 	# Rate = delta against the previous aggregate
 	awk -v now="$now" -v st="$STATE_DEV" '
@@ -386,8 +478,8 @@ do_devices() {
 			c++
 			if (c == 1) { pt = l + 0; continue }
 			split(l, a, "\t")
-			pu[a[1]] = a[3] + 0
-			pd[a[1]] = a[4] + 0
+			pu[a[1]] = a[5] + 0
+			pd[a[1]] = a[6] + 0
 		}
 		dt = now - pt
 		if (dt <= 0) dt = 1
@@ -396,14 +488,14 @@ do_devices() {
 		# A client that was not present in the previous sample has no baseline,
 		# so its rate is reported as 0 instead of its whole lifetime counter.
 		if (have && ($1 in pu)) {
-			du = $3 - pu[$1]; if (du < 0) du = 0
-			dd = $4 - pd[$1]; if (dd < 0) dd = 0
+			du = $5 - pu[$1]; if (du < 0) du = 0
+			dd = $6 - pd[$1]; if (dd < 0) dd = 0
 			ur = du / dt
 			dr = dd / dt
 		} else {
 			ur = 0; dr = 0
 		}
-		printf "%s\t%s\t%d\t%d\t%.2f\t%.2f\t%d\n", $1, $2, $3, $4, dr, ur, $5
+		printf "%s\t%s\t%s\t%s\t%d\t%d\t%.2f\t%.2f\t%d\n", $1, $2, $3, $4, $5, $6, dr, ur, $7
 	}
 	' "$TMP_RAW" > "$TMP_DEV"
 
@@ -413,11 +505,14 @@ do_devices() {
 	json_add_int "timestamp" "$now"
 	json_add_array "devices"
 
-	while IFS="$(printf '\t')" read -r ip host up down dr ur conns; do
+	while IFS="$(printf '\t')" read -r ip host alias mac up down dr ur conns; do
 		[ -n "$ip" ] || continue
+		[ "$alias" = "-" ] && alias=""
 		json_add_object
 		json_add_string "ip" "$ip"
 		json_add_string "host" "$host"
+		json_add_string "alias" "$alias"
+		json_add_string "mac" "$mac"
 		json_add_int    "up" "$up"
 		json_add_int    "down" "$down"
 		json_add_double "up_rate" "$ur"
@@ -430,16 +525,82 @@ do_devices() {
 	json_dump
 }
 
+# ------------------------------------------------------ device aliases ---
+
+# Device aliases live in /etc/config/netview as named sections keyed by MAC:
+#   config alias 'alias_aa_bb_cc_dd_ee_01'
+#       option mac 'aa:bb:cc:dd:ee:01'
+#       option name '妈妈的手机'
+# Keying by MAC (not IP) keeps the label attached to the physical device when
+# DHCP hands out a different address. The name is scrubbed of quotes and
+# backslashes so it cannot break the uci file or the JSON echoed back.
+alias_sid() { printf 'alias_%s' "$(printf '%s' "$1" | tr 'A-F' 'a-f' | tr -cd '0-9a-f:' | tr ':' '_')"; }
+
+# stdin {"mac":"...","name":"..."} -> {"ok":0|1,"action":"set"|"clear"}
+do_set_alias() {
+	local json mac name sid action rc uci_err
+	json=$(rpc_req)
+	mac=$(printf '%s' "$json" | json_str mac | tr -cd '0-9a-fA-F:')
+	mac=$(printf '%s' "$mac" | tr 'A-F' 'a-f')
+	name=$(printf '%s' "$json" | json_str name | tr -d '"\\' | cut -c 1-64)
+	name=$(printf '%s' "$name" | sed 's/^[ \t]*//;s/[ \t]*$//')
+
+	json_init
+	if ! printf '%s' "$mac" | grep -qE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'; then
+		json_add_boolean "ok" 0
+		json_add_string  "reason" "bad_mac"
+		json_dump
+		return
+	fi
+	if ! command -v uci >/dev/null 2>&1; then
+		json_add_boolean "ok" 0
+		json_add_string  "reason" "no_uci"
+		json_dump
+		return
+	fi
+
+	sid=$(alias_sid "$mac")
+	rc=0
+	uci_err=""
+	if [ -n "$name" ]; then
+		# The assignment's exit code is read immediately (rc=$?), before any
+		# other statement can clobber $? -- a missing interim read here would
+		# swallow uci failures and make a failed save report success.
+		uci_err=$(uci -q set "netview.$sid=alias" 2>&1 &&
+			uci -q set "netview.$sid.mac=$mac" 2>&1 &&
+			uci -q set "netview.$sid.name=$name" 2>&1 &&
+			uci -q commit netview 2>&1)
+		rc=$?
+		action="set"
+	else
+		uci_err=$(uci -q delete "netview.$sid" 2>&1; uci -q commit netview 2>&1)
+		rc=$?
+		action="clear"
+	fi
+
+	if [ "$rc" -eq 0 ]; then
+		json_add_boolean "ok" 1
+		json_add_string  "action" "$action"
+	else
+		json_add_boolean "ok" 0
+		json_add_string  "reason" "uci_failed"
+		json_add_string  "detail" "${uci_err:-uci 命令失败（未知原因）}"
+	fi
+	json_dump
+}
+
 # ------------------------------------------------------------------ entry ---
 
 case "$1" in
 	list)
-		echo '{ "interfaces": {}, "devices": {} }'
+		echo '{ "interfaces": {}, "devices": {},'
+		echo '  "set_alias": { "mac": "string", "name": "string" } }'
 		;;
 	call)
 		case "$2" in
 			interfaces) do_interfaces ;;
 			devices)    do_devices ;;
+			set_alias)  do_set_alias ;;
 			*)          echo '{}' ;;
 		esac
 		;;

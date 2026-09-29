@@ -194,8 +194,12 @@ if (viewApi && prevApi) {
 	same('sparkSvg 输出一致', viewApi.sparkSvg(hist), prevApi.sparkSvg(hist));
 
 	const boxA = { innerHTML: '' }, boxB = { innerHTML: '' };
-	const dev = { devices: [{ ip: '192.168.9.101', host: 'MacBook-Pro.lan', down: 8.4e6, up: 9.1e5,
-	                          down_rate: 2.4e5, up_rate: 3.4e4, conns: 42 }] };
+	const dev = { devices: [
+		{ ip: '192.168.9.101', host: 'MacBook-Pro.lan', mac: 'aa:bb:cc:dd:ee:01', alias: '我的 MacBook',
+		  down: 8.4e6, up: 9.1e5, down_rate: 2.4e5, up_rate: 3.4e4, conns: 42 },
+		{ ip: '192.168.9.133', host: '-', mac: '-', alias: '',
+		  down: 4.1e5, up: 7.4e4, down_rate: 0, up_rate: 0, conns: 6 }
+	] };
 	viewApi.renderDevices(boxA, dev);
 	prevApi.renderDevices(boxB, dev);
 	same('renderDevices 输出一致', boxA.innerHTML, boxB.innerHTML);
