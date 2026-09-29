@@ -332,6 +332,8 @@ var CSS = [
 	'            color: var(--nv-muted); background: var(--nv-card);',
 	'            border: 1px dashed var(--nv-border); border-radius: var(--nv-radius); }',
 	'.nv-hint { display: block; margin-top: 8px; font-size: 11.5px; }',
+	'.nv-appdiag { color: var(--nv-muted); font-size: 11px; margin-top: 6px;',
+	'              padding: 6px 10px; background: var(--nv-bg); border-radius: 6px; }',
 	'.nv-empty code { padding: 1px 6px; border-radius: 4px; font-size: 12px;',
 	'                 background: var(--nv-bg); color: var(--nv-text); }',
 
@@ -873,6 +875,17 @@ function renderDevices(box, data) {
 	});
 
 	box.innerHTML = html + '</tbody></table>';
+
+	/* 诊断行：把后端 uci 里实际存着的备注列出来。"改了没生效"时一眼分清
+	 * 是写入失败（这里为空）还是读取失败（这里有值但设备名没跟上）。 */
+	var al = Array.isArray(data.aliases) ? data.aliases : [];
+	if (al.length) {
+		var parts = al.map(function(a) {
+			return esc(a.ip) + ' → ' + esc(a.name);
+		}).join('；');
+		box.innerHTML += '<div class="nv-hint nv-appdiag">已存备注（' + al.length +
+			' 条）：' + parts + '</div>';
+	}
 }
 
 /* ------------------------------------------------------------------- view --- */

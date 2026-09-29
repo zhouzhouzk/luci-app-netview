@@ -601,6 +601,17 @@ do_devices() {
 
 	json_init
 	json_add_int "timestamp" "$now"
+	# 诊断：当前 uci 里已存的设备备注。别名"改了没生效"时，这一栏能直接
+	# 分清是写入失败（列表为空）还是读取失败（列表有值但设备名没跟上）。
+	json_add_array "aliases"
+	while IFS="$(printf '\t')" read -r aip aname; do
+		[ -n "$aip" ] || continue
+		json_add_object
+		json_add_string "ip" "$aip"
+		json_add_string "name" "$aname"
+		json_close_object
+	done < "$ALIAS_TMP"
+	json_close_array
 	json_add_array "devices"
 
 	while IFS="$(printf '\t')" read -r ip host mac aliased up down dr ur conns; do
