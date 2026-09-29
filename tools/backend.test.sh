@@ -532,12 +532,42 @@ json_get_var() {
 json_add_string()  { JSON_OUT="$JSON_OUT\"$1\":\"$2\","; }
 json_add_int()     { JSON_OUT="$JSON_OUT\"$1\":$2,"; }
 json_add_boolean() { JSON_OUT="$JSON_OUT\"$1\":$2,"; }
+json_add_double()  { JSON_OUT="$JSON_OUT\"$1\":$2,"; }
 json_add_object()  { JSON_OUT="${JSON_OUT:-}\"$1\":{"; }
 json_close_object(){ JSON_OUT="${JSON_OUT:-}},"; }
 json_add_array()   { JSON_OUT="${JSON_OUT:-}\"$1\":["; }
 json_close_array() { JSON_OUT="${JSON_OUT:-}],"; }
 json_dump()        { printf '{%s}\n' "${JSON_OUT%,}"; }
 EOS
+
+# busybox-uci subset: enough for the named-section alias store. State is a
+# flat key=value file; `show` prints it with the package prefix prepended.
+cat > "$SB/bin/uci" <<'EOS'
+#!/bin/sh
+while [ "$1" = "-q" ]; do Q=1; shift; done
+S="${UCI_STATE:?}"
+touch "$S" 2>/dev/null || exit 1
+cmd="$1"; shift
+case "$cmd" in
+	set)
+		k="${1%%=*}"; v="${1#*=}"
+		grep -v "^$k=" "$S" > "$S.n" 2>/dev/null
+		printf '%s=%s\n' "$k" "$v" >> "$S.n"
+		mv -f "$S.n" "$S"; exit 0 ;;
+	delete)
+		grep -vE "^$1(=|[.])" "$S" > "$S.n" 2>/dev/null
+		mv -f "$S.n" "$S"; exit 0 ;;
+	get)
+		v=$(grep "^$1=" "$S" | head -n1 | cut -d= -f2-)
+		[ -n "$v" ] && { printf '%s\n' "$v"; exit 0; }
+		[ "$Q" = 1 ] && exit 0; exit 1 ;;
+	commit) exit 0 ;;
+	show) grep -v '^$' "$S" 2>/dev/null; exit 0 ;;
+esac
+[ "$Q" = 1 ] && exit 0
+exit 1
+EOS
+chmod +x "$SB/bin/uci"
 
 # A full copy of the backend with every filesystem knob aimed at the sandbox.
 sed \
@@ -552,6 +582,8 @@ sed \
 	-e "s#^FEAT_UP_TMP=.*#FEAT_UP_TMP=\"$SB/work/feature.upload\"#" \
 	-e "s#^FEAT_EXTRACT=.*#FEAT_EXTRACT=\"$SB/work/featup\"#" \
 	-e "s#^OAF_SYSCTL=.*#OAF_SYSCTL=\"$SB/proc/sys/oaf\"#" \
+	-e "s#^DHCP_LEASES=.*#DHCP_LEASES=\"$SB/dhcp.leases\"#" \
+	-e "s#^ARP_FILE=.*#ARP_FILE=\"$SB/proc/net/arp\"#" \
 	-e "s#/sys/class/net#$SB/sys/class/net#g" \
 	-e "s#^\. /usr/share/libubox/jshn.sh#. \"$SB/jshn.sh\"#" \
 	"$SRC" > "$SB/netview.rpc"
@@ -592,7 +624,35 @@ OUT=$(printf '{"chunk":"%s","seq":0}' '%%%' | rpc feature_upload)
 ck "坏 base64 报 decode_failed" "$(printf '%s' "$OUT" | grep -c 'decode_failed')" "1"
 rm -f "$SB/work/feature.upload"
 
+export UCI_STATE="$SB/uci.state"
 echo ""
+echo "=== devices（别名 > DHCP 主机名，MAC 双来源）==="
+# 重写 conntrack 夹具为带 bytes= 的两行（helper 段的 ct_ports 测试已跑完）
+printf 'ipv4     2 tcp      6 431999 ESTABLISHED src=192.168.9.5 dst=8.8.8.8 sport=1 dport=443 src=8.8.8.8 dst=192.168.9.5 sport=443 dport=1 packets=1 bytes=100 mark=0 use=1\nipv4     2 tcp      6 431999 ESTABLISHED src=192.168.9.6 dst=8.8.4.4 sport=2 dport=443 src=8.8.4.4 dst=192.168.9.6 sport=443 dport=2 packets=1 bytes=200 mark=0 use=1\n' > "$SB/proc/nf_conntrack"
+printf '431999 aa:bb:cc:dd:ee:01 192.168.9.5 desktop\n' > "$SB/dhcp.leases"
+printf 'IP address       HW type     Flags       HW address            Mask     Device\n192.168.9.6     0x1         0x2         aa:bb:cc:dd:ee:02     *        br-lan\n' > "$SB/proc/net/arp"
+OUT=$(rpc devices < /dev/null)
+ck "dhcp 主机名进表"       "$(printf '%s' "$OUT" | grep -c '"host":"desktop"')" "1"
+ck "mac 来自 lease"        "$(printf '%s' "$OUT" | grep -c 'aa:bb:cc:dd:ee:01')" "1"
+ck "mac 回落 arp 表"       "$(printf '%s' "$OUT" | grep -c 'aa:bb:cc:dd:ee:02')" "1"
+ck "无名字按未知处理"      "$(printf '%s' "$OUT" | grep -c '"host":"-"')" "1"
+
+echo ""
+echo "=== set_alias（UCI 命名节，按 IP 定位）==="
+OUT=$(printf '{"ip":"192.168.9.6","name":"我的盒子"}' | rpc set_alias)
+ck "设置成功"             "$(printf '%s' "$OUT" | grep -c '"ok":1')" "1"
+OUT=$(rpc devices < /dev/null)
+ck "别名优先于未知"        "$(printf '%s' "$OUT" | grep -c '"host":"我的盒子"')" "1"
+ck "aliased 标志置位"      "$(printf '%s' "$OUT" | grep -c '"aliased":1')" "1"
+OUT=$(printf '{"ip":"192.168.9.6","name":""}' | rpc set_alias)
+ck "清空备注成功"          "$(printf '%s' "$OUT" | grep -c '"action":"clear"')" "1"
+OUT=$(rpc devices < /dev/null)
+ck "清空后回到未知"        "$(printf '%s' "$OUT" | grep -c '"host":"我的盒子"')" "0"
+OUT=$(printf '{"ip":"999","name":"x"}' | rpc set_alias)
+ck "坏 IP 被拒"           "$(printf '%s' "$OUT" | grep -c 'bad_ip')" "1"
+
+echo ""
+echo "=== feature_install（解压 -> 校验 -> 安装 -> 热重载）==="
 echo "=== feature_install（解压 -> 校验 -> 安装 -> 热重载）==="
 mkdir -p "$SB/pkg/app_icons"
 printf '#version v26.04.10\n#format v3.0\n#id name:[proto]\n1001 YouTube:[tcp;;443;youtube;;]\n' > "$SB/pkg/feature.cfg"

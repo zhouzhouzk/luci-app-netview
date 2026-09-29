@@ -73,6 +73,13 @@ var callFeatureInstall = rpc.declare({
 	expect: { installed: false }
 });
 
+var callSetAlias = rpc.declare({
+	object: 'netview',
+	method: 'set_alias',
+	params: [ 'ip', 'name' ],
+	expect: { ok: false }
+});
+
 var POLL_INTERVAL = 3;
 var FEATURE_POLL = 30;      /* 特征库目录只在手动/每 30 秒才去问一次 oafd */
 var MAXPOINTS = 60;          /* 60 * 3 s = 3 minutes */
@@ -318,6 +325,18 @@ var CSS = [
 	'.nv-ifname { font-weight: 600; }',
 	'.nv-devname { font-weight: 600; }',
 	'.nv-devip { color: var(--nv-muted); font-variant-numeric: tabular-nums; }',
+	'.nv-devmac { color: var(--nv-muted); font-size: 11.5px;',
+	'             font-variant-numeric: tabular-nums; white-space: nowrap; }',
+	'.nv-alias-badge { display: inline-block; margin-left: 6px; padding: 0 5px;',
+	'                  border-radius: 999px; font-size: 9.5px; font-weight: 600;',
+	'                  vertical-align: 2px; color: var(--nv-up);',
+	'                  border: 1px solid var(--nv-up); opacity: .75; }',
+	'.nv-edit { border: none; background: none; cursor: pointer; padding: 0 4px;',
+	'           font-size: 11px; color: var(--nv-muted); vertical-align: middle; }',
+	'.nv-edit:hover { color: var(--nv-up); }',
+	'.nv-edit-input { width: 130px; padding: 2px 6px; font-size: 12px;',
+	'                 border: 1px solid var(--nv-up); border-radius: 5px;',
+	'                 background: var(--nv-card); color: var(--nv-text); }',
 	/* 应用明细挂在设备名下面：小一号、灰色，流量数字回正文字色,
 	 * 免得整行都在抢注意力。名字串太长就省略号收掉。 */
 	'.nv-devapps { display: flex; flex-wrap: wrap; gap: 3px 9px; margin-top: 3px;',
@@ -925,7 +944,7 @@ function renderDevices(box, data) {
 	var max = (list[0].down + list[0].up) || 1;
 
 	var html = '<table class="nv-table"><thead><tr>' +
-		'<th>设备</th><th>IP</th>' +
+		'<th>设备</th><th>IP</th><th>MAC</th>' +
 		'<th class="nv-th-r">下行</th><th class="nv-th-r">上行</th>' +
 		'<th>累计流量</th><th class="nv-th-r">连接数</th>' +
 	'</tr></thead><tbody>';
@@ -933,13 +952,21 @@ function renderDevices(box, data) {
 	list.forEach(function(d) {
 		var total = d.down + d.up;
 		var pct = Math.max(3, Math.min(100, (total / max) * 100));
+		/* 名称：手动备注 > DHCP 主机名 > 未知设备。铅笔打开行内编辑。 */
+		var named = d.host && d.host !== '-';
+		var nameTxt = named ? esc(d.host) : '未知设备';
+		var alias = truthy(d.aliased) && named;
 
 		html += '<tr>' +
 			'<td class="nv-devname">' +
-				esc(d.host && d.host !== '-' ? d.host : '未知设备') +
+				'<span class="nv-devname-text">' + nameTxt + '</span>' +
+				(alias ? '<span class="nv-alias-badge" title="手动备注">备注</span>' : '') +
+				'<button class="nv-edit" data-role="dev-edit" data-ip="' + esc(d.ip) + '"' +
+					' data-cur="' + (named ? esc(d.host) : '') + '" title="编辑设备备注">✎</button>' +
 				appsHtml(d) +
 			'</td>' +
 			'<td class="nv-devip">' + esc(d.ip) + '</td>' +
+			'<td class="nv-devmac">' + (d.mac && d.mac !== '-' ? esc(d.mac) : '—') + '</td>' +
 			'<td class="nv-num nv-dn nv-r">' + fmtRate(d.down_rate) + '</td>' +
 			'<td class="nv-num nv-up nv-r">' + fmtRate(d.up_rate) + '</td>' +
 			'<td style="min-width:180px">' +
@@ -1441,6 +1468,83 @@ return view.extend({
 			if (bar) bar.innerHTML = featConfirm(file, curFeatVer);
 			if (state) state.innerHTML = '';
 			inp.value = '';
+		});
+
+		/* ---- 设备备注的行内编辑 ----
+		 * 表格每 3 秒整体重绘，监听一样只能挂在容器上走事件委托。 */
+		function devEditForm(ip, cur) {
+			return '<input class="nv-edit-input" data-role="dev-input" maxlength="64" value="' +
+				esc(cur) + '" placeholder="设备备注，留空清除"> ' +
+				'<button class="nv-feat-btn" data-role="dev-save" data-ip="' + esc(ip) + '">保存</button> ' +
+				'<button class="nv-feat-btn" data-role="dev-cancel">取消</button>';
+		}
+
+		function devEditorCell(ip, cur) {
+			var btn = null, td = null;
+			var nodes = devBox.querySelectorAll('button[data-ip="' + ip.replace(/"/g, '\\"') + '"]');
+			for (var i = 0; i < nodes.length; i++) {
+				if (nodes[i].getAttribute('data-role') === 'dev-edit') { btn = nodes[i]; break; }
+			}
+			if (!btn) return null;
+			td = btn.closest ? btn.closest('td') : btn.parentNode;
+			if (!td) return null;
+			var saved = td.innerHTML;
+			td.innerHTML = devEditForm(ip, cur);
+			var inp = td.querySelector('input[data-role="dev-input"]');
+			if (inp) { inp.focus(); inp.select(); }
+			return saved;
+		}
+
+		devBox.addEventListener('click', function(ev) {
+			var el = ev.target;
+			if (!el || !el.getAttribute) return;
+			var role = el.getAttribute('data-role');
+
+			if (role === 'dev-edit') {
+				var td = el.closest ? el.closest('td') : el.parentNode;
+				if (!td || td.querySelector('input')) return;
+				var ip = el.getAttribute('data-ip') || '';
+				var cur = el.getAttribute('data-cur') || '';
+				td.innerHTML = devEditForm(ip, cur);
+				var inp = td.querySelector('input[data-role="dev-input"]');
+				if (inp) { inp.focus(); inp.select(); }
+				return;
+			}
+
+			if (role === 'dev-cancel') {
+				refresh();   /* 3s 轮询反正会重绘，这里立即还原 */
+				return;
+			}
+
+			if (role === 'dev-save') {
+				var ip2 = el.getAttribute('data-ip') || '';
+				var td2 = el.closest ? el.closest('td') : el.parentNode;
+				var inp2 = td2 && td2.querySelector('input[data-role="dev-input"]');
+				var name = inp2 ? inp2.value : '';
+				el.setAttribute('disabled', 'disabled');
+				callSetAlias(ip2, name).catch(function() { return null; })
+					.then(function(res) {
+						if (res && res.ok === false) {
+							alert('保存失败：' + (res.reason === 'bad_ip' ? 'IP 地址无效' :
+								res.reason === 'no_uci' ? '路由器缺少 uci' :
+								res.reason === 'uci_failed' ? '写入配置失败' : res.reason));
+							if (inp2) { el.removeAttribute('disabled'); inp2.focus(); return; }
+						}
+						refresh();
+					});
+				return;
+			}
+		});
+
+		devBox.addEventListener('keydown', function(ev) {
+			var inp = ev.target;
+			if (!inp || !inp.getAttribute || inp.getAttribute('data-role') !== 'dev-input') return;
+			if (ev.key === 'Enter') {
+				var save = inp.parentNode.querySelector('[data-role="dev-save"]');
+				if (save) save.click();
+			} else if (ev.key === 'Escape') {
+				refresh();
+			}
 		});
 
 		refresh();

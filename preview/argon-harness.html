@@ -133,6 +133,7 @@ var ifHist = {};
 var yScale = 0;
 
 var CSS = [
+	/* ---- tokens ---- */
 	'.nv-root {',
 	'  --nv-bg:     var(--oc-surface-muted, #f2f4f8);',
 	'  --nv-card:   var(--oc-surface, #ffffff);',
@@ -154,8 +155,11 @@ var CSS = [
 	'  color: var(--nv-text); font-size: 13px; line-height: 1.5;',
 	'  padding: 2px 0 28px;',
 	'}',
-	/* 暗色这一套不沿用 --oc-*（详见 overview.js：Argon 的 dark.css 并没有
-	 * 全局重定义 --oc-*，暗色下 --oc-surface 仍是 #fff），全部写死。 */
+	/* 暗色这一套**不沿用 --oc-***，全部写死。
+	 * Argon 的 header.ut 是「cascade.css 常驻 + 按需叠加 dark.css」，
+	 * 而 dark.css 并没有全局重定义 --oc-*（只在 openclash 那页重定义了一套）。
+	 * 也就是说暗色下全局的 --oc-surface 仍然是 #fff —— 照搬就会把卡片画成
+	 * 白色、边框画成浅灰，暗色模式整个是坏的。 */
 	'@media (prefers-color-scheme: dark) {',
 	'  .nv-root {',
 	'    --nv-bg:     #14161c;',
@@ -167,20 +171,29 @@ var CSS = [
 	'    --nv-shadow: 0 1px 2px rgba(0,0,0,.35), 0 10px 28px rgba(0,0,0,.28);',
 	'  }',
 	'}',
-	/* 预览专用：把暗色回退值绑到类名上，好让按钮能切换 */
-	'.nv-root.nv-force-dark {',
-	'  --nv-bg: #14161c; --nv-card: #1c1f27; --nv-border: #2b3038;',
-	'  --nv-text: #d8dce4; --nv-muted: #8a93a5; --nv-off: #5b6373;',
-	'  --nv-shadow: 0 1px 2px rgba(0,0,0,.35), 0 10px 28px rgba(0,0,0,.28);',
-	'}',
 
+	/* ---- generic card ---- */
 	'.nv-card { background: var(--nv-card); border: 1px solid var(--nv-border);',
 	'           border-radius: var(--nv-radius); box-shadow: var(--nv-shadow); }',
 
-	/* 把标题控制权从主题手里收回。完整来龙去脉见 overview.js 里同一段：
-	 * Argon 会把 h2/h3 当成白底标题卡片，还会给 h1..h6 加
-	 * line-height:1.1 !important。标题区自带底色之后，主题在背后画的
-	 * 页头横带（header::after）就压不到副标题上了。 */
+	/* ---- page head ---- */
+	/* 主题的全局标题样式会改造这里，必须先收回控制权。以 Argon 为例：
+	 *
+	 *   1) h2 { padding:1rem 1.25rem; background:var(--white); box-shadow:… }
+	 *      —— 它把**每一个** h2 都当成"页面标题卡片"。而本插件的标题是
+	 *      .nv-head 这个 flex 容器里的 flex item，套上卡片后会被收缩成一行
+	 *      窄白卡，副标题被挤到卡片外面 —— 正好落在 Argon 页头那条 2rem 高的
+	 *      主色横带（header::after）上。#8898aa 叠 #5e72e4 只有 1.42:1，
+	 *      那行字基本等于隐形，看着就像"字缺了一半"。
+	 *   2) h3 { display:block; width:100%; background:var(--white) }
+	 *      —— 同样会把区块标题撑成整条白卡，把右边的说明挤成两行。
+	 *   3) h1..h6 { line-height: 1.1 !important }
+	 *      —— 中文标题会被压扁。要压掉对方的 !important 只能也用 !important
+	 *      （这里选择器权重更高，且本样式在 <body> 内、文档序更靠后）。
+	 *
+	 * 另外把标题区做成卡片：无论主题在背后画什么横带，标题和副标题都落在
+	 * 确定的底色上。这既符合 Argon 自己"页面标题即卡片"的惯例，也让它成为
+	 * 主题无关的解法 —— 不用去猜某个主题的横带有多高。 */
 	'.nv-root h2, .nv-root h3 { margin: 0; padding: 0; width: auto; display: block;',
 	'                           background: none; border: 0; box-shadow: none;',
 	'                           border-radius: 0; color: inherit;',
@@ -194,12 +207,14 @@ var CSS = [
 	'.nv-live { display: inline-block; width: 6px; height: 6px; border-radius: 50%;',
 	'           background: var(--nv-ok); margin-right: 5px; vertical-align: 1px; }',
 
+	/* ---- hero grid ---- */
 	/* 不用 align-items:start：左列必须拉伸，图表下面那张卡才能吃掉与右列的
 	 * 高度差。只用内容高度的话 flex-grow 无从发力，留白还在。 */
 	'.nv-hero { display: grid; gap: 16px;',
 	'           grid-template-columns: minmax(0, 1fr) 364px; }',
 	'@media (max-width: 1000px) { .nv-hero { grid-template-columns: minmax(0, 1fr); } }',
 
+	/* ---- hero chart ---- */
 	'.nv-chartcard { padding: 16px 18px 10px; }',
 	'.nv-chart-hd { display: flex; align-items: center; flex-wrap: wrap;',
 	'               gap: 6px 14px; margin-bottom: 4px; }',
@@ -222,6 +237,11 @@ var CSS = [
 	'                  color: var(--nv-muted); }',
 
 	/* ---- connection overview ---- */
+	/* The side column stacks four cards and ends up taller than the chart, so
+	 * the grid row is sized by the side column and the left column would stop
+	 * short, leaving a hole under the chart. .nv-col is a flex column and this
+	 * card takes the slack via flex-grow, which equalises the two columns
+	 * without pinning the chart to a magic height. */
 	'.nv-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }',
 	'.nv-conn { flex: 1 1 auto; display: flex; flex-direction: column;',
 	'          padding: 15px 17px 16px; min-height: 148px; }',
@@ -237,6 +257,8 @@ var CSS = [
 	'.nv-gauge-n i { font-style: normal; font-size: 12px; font-weight: 400;',
 	'               color: var(--nv-muted); margin-left: 5px; }',
 	'.nv-gauge-s { margin-top: 6px; font-size: 11.5px; color: var(--nv-muted); }',
+	/* taller than the table's inline bar: this one is the page's only read on
+	 * how full the connection table is, so it has to be readable at a glance */
 	'.nv-conn .nv-track { height: 8px; border-radius: 4px; margin: 10px 0 0; }',
 	'.nv-dist { flex: 1 1 220px; min-width: 0; }',
 	'.nv-stack { display: flex; height: 12px; border-radius: 6px;',
@@ -252,6 +274,7 @@ var CSS = [
 	'.nv-key b { margin-left: auto; padding-left: 6px; font-weight: 600;',
 	'           color: var(--nv-muted); font-variant-numeric: tabular-nums; }',
 
+	/* ---- side column ---- */
 	'.nv-side { display: flex; flex-direction: column; gap: 16px; }',
 
 	'.nv-mini { display: flex; align-items: center; gap: 13px; padding: 15px 17px; }',
@@ -279,6 +302,7 @@ var CSS = [
 	'.nv-row-v { min-width: 0; word-break: break-all; }',
 	'.nv-row-v em { font-style: normal; color: var(--nv-muted); }',
 
+	/* ---- interface tiles ---- */
 	'.nv-tiles { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }',
 	'.nv-tile { display: flex; align-items: center; gap: 7px; padding: 9px 10px;',
 	'           border-radius: 11px; background: var(--nv-bg);',
@@ -292,11 +316,14 @@ var CSS = [
 	'.nv-tile-s { font-size: 10px; color: var(--nv-muted); margin-top: 1px;',
 	'             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
 
+	/* ---- sections ---- */
 	'.nv-sec { margin-top: 18px; }',
 	'.nv-sec-hd { display: flex; align-items: baseline; gap: 10px; margin: 0 2px 10px; }',
+	/* 卡片外观由上面「page head」里的 .nv-root h2/h3 全局重置收回 */
 	'.nv-sec-hd h3 { font-size: 14px; font-weight: 600; }',
 	'.nv-sec-hd span { font-size: 11.5px; color: var(--nv-muted); }',
 
+	/* ---- tables ---- */
 	'.nv-tablewrap { overflow-x: auto; border-radius: var(--nv-radius);',
 	'                background: var(--nv-card); border: 1px solid var(--nv-border);',
 	'                box-shadow: var(--nv-shadow); }',
@@ -319,6 +346,20 @@ var CSS = [
 	'.nv-ifname { font-weight: 600; }',
 	'.nv-devname { font-weight: 600; }',
 	'.nv-devip { color: var(--nv-muted); font-variant-numeric: tabular-nums; }',
+	'.nv-devmac { color: var(--nv-muted); font-size: 11.5px;',
+	'             font-variant-numeric: tabular-nums; white-space: nowrap; }',
+	'.nv-alias-badge { display: inline-block; margin-left: 6px; padding: 0 5px;',
+	'                  border-radius: 999px; font-size: 9.5px; font-weight: 600;',
+	'                  vertical-align: 2px; color: var(--nv-up);',
+	'                  border: 1px solid var(--nv-up); opacity: .75; }',
+	'.nv-edit { border: none; background: none; cursor: pointer; padding: 0 4px;',
+	'           font-size: 11px; color: var(--nv-muted); vertical-align: middle; }',
+	'.nv-edit:hover { color: var(--nv-up); }',
+	'.nv-edit-input { width: 130px; padding: 2px 6px; font-size: 12px;',
+	'                 border: 1px solid var(--nv-up); border-radius: 5px;',
+	'                 background: var(--nv-card); color: var(--nv-text); }',
+	/* 应用明细挂在设备名下面：小一号、灰色，流量数字回正文字色,
+	 * 免得整行都在抢注意力。名字串太长就省略号收掉。 */
 	'.nv-devapps { display: flex; flex-wrap: wrap; gap: 3px 9px; margin-top: 3px;',
 	'              font-size: 11px; font-weight: 400; color: var(--nv-muted); }',
 	'.nv-devapps span { display: inline-flex; align-items: baseline; gap: 4px;',
@@ -385,7 +426,12 @@ var CSS = [
 	'.nv-feat-bar { height: 4px; border-radius: 2px; background: var(--nv-border);',
 	'               margin-top: 6px; overflow: hidden; }',
 	'.nv-feat-bar i { display: block; height: 100%; background: var(--nv-up);',
-	'                transition: width .3s ease; }'
+	'                transition: width .3s ease; }',
+	'.nv-root.nv-force-dark {',
+	'  --nv-bg: #14161c; --nv-card: #1c1f27; --nv-border: #2b3038;',
+	'  --nv-text: #d8dce4; --nv-muted: #8a93a5; --nv-off: #5b6373;',
+	'  --nv-shadow: 0 1px 2px rgba(0,0,0,.35), 0 10px 28px rgba(0,0,0,.28);',
+	'}',
 ].join('\n');
 
 /* ------------------------------------------------------------------ icons --- */
@@ -836,14 +882,23 @@ var APP_STATE_HINT = {
 };
 
 function renderDevices(box, data) {
-	if (!data) { box.innerHTML = '<div class="nv-empty">无法读取设备数据</div>'; return; }
+	if (!data) {
+		box.innerHTML = '<div class="nv-empty">无法读取设备数据</div>';
+		return;
+	}
 
 	if (data.error === 'conntrack_unavailable') {
 		box.innerHTML = '<div class="nv-empty">内核 conntrack 表不可用，无法统计设备流量</div>';
 		return;
 	}
+
+	/* Netfilter defaults to acct=0 and only OpenWrt's
+	 * /etc/sysctl.d/11-nf-conntrack.conf turns it on; without it conntrack
+	 * lines carry no byte counters at all. Report that instead of drawing a
+	 * table full of zeros. */
 	if (data.error === 'conntrack_acct_disabled') {
-		box.innerHTML = '<div class="nv-empty">内核 conntrack 未开启流量记账，无法统计设备流量' +
+		box.innerHTML = '<div class="nv-empty">' +
+			'内核 conntrack 未开启流量记账，无法统计设备流量' +
 			'<span class="nv-hint">在路由器上执行 ' +
 			'<code>sysctl -w net.netfilter.nf_conntrack_acct=1</code> 即可恢复' +
 			'（只对之后新建的连接生效）</span></div>';
@@ -854,11 +909,15 @@ function renderDevices(box, data) {
 		return ((b.down + b.up) - (a.down + a.up));
 	}).slice(0, MAX_DEVICES);
 
-	if (!list.length) { box.innerHTML = '<div class="nv-empty">暂无活动的 NAT / 转发连接</div>'; return; }
+	if (!list.length) {
+		box.innerHTML = '<div class="nv-empty">暂无活动的 NAT / 转发连接</div>';
+		return;
+	}
 
 	var max = (list[0].down + list[0].up) || 1;
+
 	var html = '<table class="nv-table"><thead><tr>' +
-		'<th>设备</th><th>IP</th>' +
+		'<th>设备</th><th>IP</th><th>MAC</th>' +
 		'<th class="nv-th-r">下行</th><th class="nv-th-r">上行</th>' +
 		'<th>累计流量</th><th class="nv-th-r">连接数</th>' +
 	'</tr></thead><tbody>';
@@ -866,16 +925,27 @@ function renderDevices(box, data) {
 	list.forEach(function(d) {
 		var total = d.down + d.up;
 		var pct = Math.max(3, Math.min(100, (total / max) * 100));
+		/* 名称：手动备注 > DHCP 主机名 > 未知设备。铅笔打开行内编辑。 */
+		var named = d.host && d.host !== '-';
+		var nameTxt = named ? esc(d.host) : '未知设备';
+		var alias = truthy(d.aliased) && named;
+
 		html += '<tr>' +
 			'<td class="nv-devname">' +
-				esc(d.host && d.host !== '-' ? d.host : '未知设备') +
+				'<span class="nv-devname-text">' + nameTxt + '</span>' +
+				(alias ? '<span class="nv-alias-badge" title="手动备注">备注</span>' : '') +
+				'<button class="nv-edit" data-role="dev-edit" data-ip="' + esc(d.ip) + '"' +
+					' data-cur="' + (named ? esc(d.host) : '') + '" title="编辑设备备注">✎</button>' +
 				appsHtml(d) +
 			'</td>' +
 			'<td class="nv-devip">' + esc(d.ip) + '</td>' +
+			'<td class="nv-devmac">' + (d.mac && d.mac !== '-' ? esc(d.mac) : '—') + '</td>' +
 			'<td class="nv-num nv-dn nv-r">' + fmtRate(d.down_rate) + '</td>' +
 			'<td class="nv-num nv-up nv-r">' + fmtRate(d.up_rate) + '</td>' +
-			'<td style="min-width:180px"><div class="nv-track"><i style="width:' +
-				pct.toFixed(1) + '%"></i></div><span class="nv-num">' + fmtBytes(total) + '</span></td>' +
+			'<td style="min-width:180px">' +
+				'<div class="nv-track"><i style="width:' + pct.toFixed(1) + '%"></i></div>' +
+				'<span class="nv-num">' + fmtBytes(total) + '</span>' +
+			'</td>' +
 			'<td class="nv-num nv-r">' + (Number(d.conns) || 0) + '</td>' +
 		'</tr>';
 	});
@@ -1278,18 +1348,18 @@ function sampleIfaces() {
  * base，这样应用数字会跟着设备总量一起动，不会出现"设备涨、应用不动"的假象。
  * 最后两台故意不挂应用：真机上没被识别出来的设备就是这样，空着才对。 */
 var DEVICES = [
-	{ ip: '192.168.9.101', host: 'MacBook-Pro.lan', base: [ 8.4e6, 9.1e5 ], conns: 42,
+	{ ip: '192.168.9.101', host: 'MacBook-Pro.lan', mac: 'A4:83:E7:11:22:33', base: [ 8.4e6, 9.1e5 ], conns: 42,
 	  apps: [ [ [ 'YouTube', 0.62, 0.18, 1001 ], [ 'GitHub', 0.09, 0.31, 1002 ], [ 'Steam', 0.05, 0.04, 1003 ] ] ] },
-	{ ip: '192.168.9.102', host: 'DESKTOP-7K3.lan', base: [ 5.1e6, 3.4e5 ], conns: 28,
+	{ ip: '192.168.9.102', host: 'DESKTOP-7K3.lan', mac: '94:E6:F7:22:33:44', base: [ 5.1e6, 3.4e5 ], conns: 28,
 	  apps: [ [ [ '哔哩哔哩', 0.44, 0.12, 1004 ], [ '微信', 0.08, 0.22, 1005 ] ] ] },
-	{ ip: '192.168.9.118', host: 'iPhone-15.lan',   base: [ 2.2e6, 1.9e5 ], conns: 17,
+	{ ip: '192.168.9.118', host: 'iPhone-15.lan', mac: 'F0:18:98:33:44:55', base: [ 2.2e6, 1.9e5 ], conns: 17,
 	  apps: [ [ [ '抖音', 0.51, 0.15, 1006 ], [ 'QQ 音乐', 0.13, 0.05, 1007 ] ] ] },
-	{ ip: '192.168.9.120', host: 'nas.lan',         base: [ 1.6e6, 6.2e6 ], conns: 9,
+	{ ip: '192.168.9.120', host: 'nas.lan', mac: '00:11:32:44:55:66', base: [ 1.6e6, 6.2e6 ], conns: 9,
 	  apps: [ [ [ '阿里云盘', 0.30, 0.71, 1008 ] ] ] },
-	{ ip: '192.168.9.133', host: '-',               base: [ 4.1e5, 7.4e4 ], conns: 6,
+	{ ip: '192.168.9.133', host: '-', mac: '-', base: [ 4.1e5, 7.4e4 ], conns: 6,
 	  apps: [ [ [ '王者荣耀', 0.74, 0.33, 2001 ] ] ] },
-	{ ip: '192.168.9.144', host: 'raspberrypi.lan', base: [ 1.8e5, 3.2e4 ], conns: 4 },
-	{ ip: '192.168.9.150', host: 'TV-Box.lan',      base: [ 9.2e6, 1.1e5 ], conns: 3,
+	{ ip: '192.168.9.144', host: 'raspberrypi.lan', mac: 'B8:27:EB:55:66:77', base: [ 1.8e5, 3.2e4 ], conns: 4 },
+	{ ip: '192.168.9.150', host: 'TV-Box.lan', mac: '6C:21:A2:66:77:88', base: [ 9.2e6, 1.1e5 ], conns: 3,
 	  apps: [ [ [ '爱奇艺', 0.83, 0.21, 1009 ], [ 'Netflix', 0.11, 0.06, 1010 ] ] ] }
 ];
 
@@ -1306,7 +1376,8 @@ function sampleDevices() {
 			d.base[1] += (4.0e4 * envelope(tick, pu)) * POLL_INTERVAL;
 
 			return {
-				ip: d.ip, host: d.host,
+				ip: d.ip, host: d.host, mac: d.mac,
+				aliased: (d.ip === '192.168.9.101') ? 1 : 0,
 				down: Math.round(d.base[0]), up: Math.round(d.base[1]),
 				down_rate: 2.4e5 * envelope(tick, pd),
 				up_rate: 3.4e4 * envelope(tick, pu),
