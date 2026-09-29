@@ -984,14 +984,15 @@ function featHtml(f) {
 			'<div class="nv-feat-row">' +
 				'<div class="nv-feat-info">' +
 					'<b>本地上传更新</b>' +
-					'<span>从 openappfilter.com 下载特征库 zip 后直接选择上传' +
-					'（无需解压），要求 v3.0 格式</span>' +
+					'<span>从 openappfilter.com 下载特征包后直接选择上传' +
+					'（zip 或 .bin 均可，无需解压），要求 v3.0 格式</span>' +
 				'</div>' +
 				'<input type="file" class="nv-feat-file" data-role="feat-file"' +
-					' accept=".zip,.tgz,.gz" style="display:none">' +
+					' accept=".zip,.tgz,.gz,.bin" style="display:none">' +
 				'<button class="nv-feat-btn" data-role="feat-pick">选择文件…</button>' +
 			'</div>' +
-			'<div class="nv-feat-upstate" data-role="feat-upstate"></div>' +
+			'<div data-role="feat-confirmbar"></div>' +
+			'<div data-role="feat-upstate"></div>' +
 			featStatus(f.update) +
 			'</div>';
 	}
@@ -1039,24 +1040,40 @@ function featHtml(f) {
 	return '<div class="nv-feat">' + hd + rows + featStatus(up) + '</div>';
 }
 
-/* 本地上传的阶段性反馈。kind: progress / done / failed */
+/* 上传前的确认条：显示文件信息，用户点了确认才真正开始传输。 */
+function featConfirm(file, curVer) {
+	return '<div class="nv-feat-status running" data-role="feat-confirm">' +
+		'准备上传 <b>' + esc(file.name) + '</b>（' + fmtBytes(file.size) +
+		'），将替换当前特征库' +
+		(curVer ? '（当前 ' + esc(curVer) + '，原文件备份为 .bak）' : '') +
+		'。<div class="nv-feat-bar"><i style="width:0%"></i></div>' +
+		'<div style="margin-top:6px">' +
+			'<button class="nv-feat-btn" data-role="feat-go">确认上传</button> ' +
+			'<button class="nv-feat-btn" data-role="feat-cancel">取消</button>' +
+		'</div></div>';
+}
+
+/* 本地上传的阶段性反馈。kind: progress / installing / done / failed */
 function featUploadState(kind, a, b) {
 	var cls = 'nv-feat-status';
 	var txt = '';
+	var bar = '';
 
 	if (kind === 'progress') {
 		var pct = Math.min(100, a * 100 / b);
 		txt = '上传中 ' + pct.toFixed(0) + '%（' + fmtBytes(a) + ' / ' +
 			fmtBytes(b) + '）';
 		cls += ' running';
+		bar = '<div class="nv-feat-bar"><i style="width:' + pct + '%"></i></div>';
 	}
 	else if (kind === 'installing') {
-		txt = '正在解包安装…';
+		txt = '上传完成，正在解包安装…';
 		cls += ' running';
+		bar = '<div class="nv-feat-bar"><i style="width:100%"></i></div>';
 	}
 	else if (kind === 'done') {
 		var r = a || {};
-		txt = '已更新到 ' + (r.version || '?') + '，' +
+		txt = '✔ 已更新到 ' + (r.version || '?') + '，' +
 			fmtInt(r.app_count) + ' 个应用';
 		if (Number(r.icons) > 0)
 			txt += '，图标 ' + fmtInt(r.icons) + ' 张';
@@ -1076,15 +1093,16 @@ function featUploadState(kind, a, b) {
 			bad_format:     '特征格式不是 v3.0（包内格式：' + (b || '未知') + '）',
 			write_failed:   '写入 /etc/appfilter 失败，检查存储空间'
 		}[a] || (a || '安装失败');
-		txt = '特征库更新失败：' + why;
+		txt = '✘ 特征库更新失败：' + why;
 		cls += ' failed';
 	}
 
-	return '<div class="' + cls + '">' + txt + '</div>';
+	return '<div class="' + cls + '">' + txt + bar + '</div>';
 }
 
 /* 把一个 File 按块 base64 传给 feature_upload，然后触发 feature_install。
- * 全程 Promise 链（文件切片读取是异步的，且块必须按序到达）。 */
+ * 全程 Promise 链（文件切片读取是异步的，且块必须按序到达）。
+ * 每块最多重试 2 次 —— 一次 rpc 抖动不该让整次上传前功尽弃。 */
 function uploadFeatureFile(file, stateEl, onDone) {
 	function b64OfBlob(blob) {
 		return new Promise(function(resolve, reject) {
@@ -1098,6 +1116,21 @@ function uploadFeatureFile(file, stateEl, onDone) {
 		});
 	}
 
+	function sendChunk(b64, seq, tries) {
+		return callFeatureUpload(b64, seq).catch(function(err) {
+			if (tries < 2) {
+				return new Promise(function(res) {
+					setTimeout(res, 500 * (tries + 1));
+				}).then(function() { return sendChunk(b64, seq, tries + 1); });
+			}
+			throw err;
+		}).then(function(res) {
+			if (res && res.ok === false)
+				throw { upload: true, reason: res.reason || 'decode_failed' };
+			return res;
+		});
+	}
+
 	var nchunks = Math.ceil(file.size / UPLOAD_CHUNK);
 	var chain = Promise.resolve();
 
@@ -1105,10 +1138,8 @@ function uploadFeatureFile(file, stateEl, onDone) {
 		chain = chain.then(function() {
 			var end = Math.min((i + 1) * UPLOAD_CHUNK, file.size);
 			return b64OfBlob(file.slice(i * UPLOAD_CHUNK, end)).then(function(b64) {
-				return callFeatureUpload(b64, i);
-			}).then(function(res) {
-				if (res && res.ok === false)
-					throw { upload: true, reason: res.reason || 'decode_failed' };
+				return sendChunk(b64, i, 0);
+			}).then(function() {
 				stateEl.innerHTML = featUploadState('progress', end, file.size);
 			});
 		});
@@ -1294,6 +1325,11 @@ return view.extend({
 			featPending = true;
 			return callFeatures().catch(function() { return null; }).then(function(f) {
 				featBox.innerHTML = featHtml(f);
+				/* 确认条要显示"将替换当前 vX"；新旧两种数据形状都取一下 */
+				if (f) {
+					curFeatVer = (f.local && f.local.version) ||
+					             (f.current && f.current.version) || '';
+				}
 			}).finally(function() {
 				featPending = false;
 			});
@@ -1301,6 +1337,9 @@ return view.extend({
 
 		/* 更新按钮与文件选择都走事件委托：卡片内容每 30 秒会被 innerHTML
 		 * 整个换掉，逐个绑监听会随着重绘失效。 */
+		var pendingFile = null;   /* 选好了、等用户点确认的文件 */
+		var curFeatVer = '';      /* 确认条里显示"将替换 vX"用 */
+
 		featBox.addEventListener('click', function(ev) {
 			var el = ev.target;
 			while (el && el !== featBox && !(el.getAttribute && el.getAttribute('data-role')))
@@ -1311,6 +1350,26 @@ return view.extend({
 			if (role === 'feat-pick') {
 				var inp = featBox.querySelector('input[data-role="feat-file"]');
 				if (inp) inp.click();
+				return;
+			}
+
+			/* 确认条：点了"确认上传"才真正开始传输。 */
+			if (role === 'feat-go' && pendingFile) {
+				var state = featBox.querySelector('[data-role="feat-upstate"]');
+				var file = pendingFile;
+				pendingFile = null;
+				if (!state) return;
+				uploadActive = true;
+				uploadFeatureFile(file, state, function() {
+					uploadActive = false;
+					refreshFeatures();
+				});
+				return;
+			}
+			if (role === 'feat-cancel') {
+				pendingFile = null;
+				var bar = featBox.querySelector('[data-role="feat-confirmbar"]');
+				if (bar) bar.innerHTML = '';
 				return;
 			}
 
@@ -1331,13 +1390,11 @@ return view.extend({
 			var file = inp.files && inp.files[0];
 			if (!file) return;
 
-			var state = featBox.querySelector('[data-role="feat-upstate"]');
-			if (!state) return;
-			uploadActive = true;
-			uploadFeatureFile(file, state, function() {
-				uploadActive = false;
-				refreshFeatures();
-			});
+			/* 不立刻传 —— 先出确认条，用户点"确认上传"再开始。 */
+			pendingFile = file;
+			var bar = featBox.querySelector('[data-role="feat-confirmbar"]');
+			if (bar) bar.innerHTML = featConfirm(file, curFeatVer);
+			inp.value = '';
 		});
 
 		refresh();

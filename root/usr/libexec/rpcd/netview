@@ -1244,23 +1244,23 @@ do_feature_update() {
 # file) and feature_install runs the recipe above.
 
 # stdin {"chunk":"<base64>","seq":<n>} -> {"received":<bytes>,"limit":<max>}
+#
+# The chunk is read with json_str, NOT jshn: jshn parses token by token in pure
+# shell, which crawls through a 48 KiB base64 blob (dozens of seconds per block
+# on a router) and blows the request budget over a 2 MB file. awk splits by
+# quotes in a blink, and base64 never contains a quote, so this is exact.
 do_feature_upload() {
-	local json chunk seq
+	local json chunk seq size
 	json=$(oaf_req)
-	chunk=""; seq=0
-	if [ -n "$json" ]; then
-		json_init
-		json_load "$json"
-		json_get_var chunk chunk
-		json_get_var seq seq
-	fi
-	case "$seq" in ''|*[!0-9]*) seq=0 ;; esac
+	chunk=$(printf '%s' "$json" | json_str chunk)
+	seq=$(num_or0 "$(printf '%s' "$json" | \
+		sed -n 's/.*"seq":[ \t]*\([0-9][0-9]*\).*/\1/p')")
 
-	json_init
 	if [ "$seq" = "0" ]; then
 		: > "$FEAT_UP_TMP"
 	fi
 
+	json_init
 	if [ -n "$chunk" ]; then
 		if ! printf '%s' "$chunk" | base64 -d >> "$FEAT_UP_TMP" 2>/dev/null; then
 			json_add_boolean "ok" 0
@@ -1270,7 +1270,6 @@ do_feature_upload() {
 		fi
 	fi
 
-	local size
 	size=$(f_size "$FEAT_UP_TMP")
 	if [ "$size" -gt "$FEAT_MAX_SIZE" ]; then
 		rm -f "$FEAT_UP_TMP"
