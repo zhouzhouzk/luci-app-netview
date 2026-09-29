@@ -19,6 +19,9 @@ TMP_SNAP="$WORKDIR/if.snap"
 TMP_IF="$WORKDIR/if.diff"
 TMP_RAW="$WORKDIR/dev.raw"
 TMP_DEV="$WORKDIR/dev.diff"
+TMP_PORT="$WORKDIR/svc.list"
+TMP_OAFMAP="$WORKDIR/oaf.map"
+TMP_OAFIDS="$WORKDIR/oaf.ids"
 
 mkdir -p "$WORKDIR"
 
@@ -155,6 +158,182 @@ if_roles() {
 	[ -n "$3" ] && [ "$name" = "$3" ] && out="${out}WAN6,"
 	[ -n "$4" ] && [ "$name" = "$4" ] && out="${out}LAN,"
 	printf '%s' "${out%,}"
+}
+
+# -------------------------------------------------------------- conntrack ---
+
+# Connection table paths. Variables rather than literals so the test sandbox
+# can aim them at a fake tree.
+CT_SYS="/proc/sys/net/netfilter"
+CT_TABLE="/proc/net/nf_conntrack"
+CT_TABLE_ALT="/proc/net/ip_conntrack"
+
+# "<count> <max>" for the connection table, zeros when nf_conntrack is absent.
+ct_limits() {
+	local c m
+	c=$(cat "$CT_SYS/nf_conntrack_count" 2>/dev/null)
+	m=$(cat "$CT_SYS/nf_conntrack_max" 2>/dev/null)
+	case "$c" in ''|*[!0-9]*) c=0 ;; esac
+	case "$m" in ''|*[!0-9]*) m=0 ;; esac
+	printf '%s %s' "$c" "$m"
+}
+
+# Aggregate a conntrack table into "<service>\t<count>" lines: the top N, then
+# everything else merged into 其他.
+#
+# Only the *first* dport is read, because the original tuple always points at
+# whichever endpoint the packet was addressed to: outbound that is the remote
+# service port; inbound -- including anything arriving through a port-forward --
+# it is the local one. Either way it answers "what was being reached", which is
+# what this panel is for. The reply tuple's dport is the client's ephemeral
+# port and carries no information here.
+ct_ports() {
+	local table="$1"
+	[ -r "$table" ] || return 0
+	awk '
+	function svc(p, pr) {
+		if (p == 443) return (pr == "udp") ? "QUIC" : "HTTPS"
+		if (p == 80 || p == 8080) return "HTTP"
+		if (p == 53) return "DNS"
+		if (p == 853) return "DoT"
+		if (p == 123) return "NTP"
+		if (p == 22) return "SSH"
+		if (p == 51820) return "WireGuard"
+		if (p == 3478) return "STUN"
+		if (p == 5353) return "mDNS"
+		if (p == 1900) return "SSDP"
+		if (p == 67 || p == 68) return "DHCP"
+		if (p == 465 || p == 587 || p == 993 || p == 995) return "邮件"
+		return "其他"
+	}
+	# /proc/net/ip_conntrack has no leading "ipv4" column, so the protocol name
+	# is looked up among the fields instead of assumed to sit at $3.
+	/^ipv6/ { next }
+	/src=/ {
+		port = ""; pr = ""
+		for (i = 1; i <= NF; i++) {
+			v = $i
+			if (pr == "" && v ~ /^(tcp|udp|sctp|dccp)$/) pr = v
+			else if (port == "" && v ~ /^dport=/) port = substr(v, 7)
+		}
+		# ICMP and friends carry no port at all; they are still connections.
+		cnt[svc(port, pr)]++
+	}
+	END {
+		for (k in cnt) printf "%s\t%d\n", k, cnt[k]
+	}
+	' "$table" | top_list 5
+}
+
+# "<name>\t<count>" lines -> the top N by count, everything else merged into
+# 其他, which is always emitted last so the stacked bar has a stable tail.
+#
+# Selection sort on purpose: the number of distinct names is tiny (services, or
+# app categories) so O(n^2) is irrelevant, and it avoids relying on sort(1).
+top_list() {
+	local top="${1:-5}"
+	awk -v top="$top" '
+		BEGIN { FS = "\t" }
+		{ sum[$1] += $2 + 0 }
+		END {
+			# 其他 is a bucket, not a member: keep it out of the ranking and
+			# fold the tail into whatever it already held.
+			rest = 0
+			if ("其他" in sum) {
+				rest = sum["其他"]
+				delete sum["其他"]
+			}
+			n = 0
+			for (k in sum) { n++; key[n] = k; val[n] = sum[k] }
+			for (i = 1; i <= n; i++) {
+				m = i
+				for (j = i + 1; j <= n; j++) if (val[j] > val[m]) m = j
+				if (m != i) {
+					t = val[i]; val[i] = val[m]; val[m] = t
+					t = key[i]; key[i] = key[m]; key[m] = t
+				}
+			}
+			for (i = top + 1; i <= n; i++) rest += val[i]
+			for (i = 1; i <= n && i <= top; i++) printf "%s\t%d\n", key[i], val[i]
+			if (rest > 0) printf "其他\t%d\n", rest
+		}
+	'
+}
+
+# --------------------------------------------------------- OAF (optional) ---
+
+# OpenAppFilter identifies applications with a kernel module (kmod-oaf) plus a
+# user-space daemon (appfilter). The daemon publishes its results on the ubus
+# object "appfilter"; the kernel module leaves /proc/sys/oaf behind.
+#
+# What OAF does *not* give, and it matters here: every field it reports is a
+# duration (first_time / latest_time), never a byte counter, and visit_info
+# carries no five-tuple to join back against conntrack. So the honest reading
+# of its data is "which apps are in use, on how many devices" -- not "which app
+# is eating the bandwidth". Everything below is written to degrade quietly: on
+# a router without OAF the caller falls back to port classification.
+OAF_PROC="/proc/sys/oaf"
+OAF_CFG="/tmp/feature.cfg"
+
+# Usable right now? The module being loaded is not enough on its own -- oafd is
+# what answers ubus, and the feature database is what turns appids into names.
+oaf_ready() {
+	[ -r "$OAF_PROC/enable" ] || return 1
+	[ -r "$OAF_CFG" ] || return 1
+	command -v ubus >/dev/null 2>&1 || return 1
+	ubus -v list appfilter >/dev/null 2>&1 || return 1
+	return 0
+}
+
+# appid -> "<category>\t<app name>" out of OAF's feature database.
+#
+# The file is plain text, one application per line under a class banner:
+#   #class 视频
+#   1001 YouTube:[tcp;;443;youtube.com;;]
+#   1002 抖音:[tcp;;443;douyin.com;;]
+# which means the id->name->category mapping needs no ubus round-trip at all.
+oaf_app_map() {
+	local cfg="$1"
+	[ -r "$cfg" ] || return 0
+	awk -F: '
+		/^#class/ {
+			cls = $0
+			sub(/^#class[ \t]+/, "", cls)
+			sub(/[ \t\r]+$/, "", cls)
+			next
+		}
+		/^[ \t]*#/ { next }
+		{
+			n = split($1, a, /[ \t]+/)
+			if (n >= 2 && a[1] ~ /^[0-9]+$/) printf "%s\t%s\t%s\n", a[1], cls, a[2]
+		}
+	' "$cfg"
+}
+
+# "<category>\t<count>" from OAF's visit records.
+#
+# visit_info holds one entry per app per device, so counting pairs gives "this
+# category is in use on N devices" -- which is the closest thing to a traffic
+# breakdown OAF can offer.
+oaf_classes() {
+	local cfg="$1" ids
+	oaf_app_map "$cfg" > "$TMP_OAFMAP"
+	[ -s "$TMP_OAFMAP" ] || return 0
+
+	# ubus prints the reply as JSON, and appid is the only field needed.
+	# Flattening first keeps this independent of key order and nesting.
+	ids=$(ubus call appfilter dev_visit_list 2>/dev/null \
+		| tr -d ' \t\r\n' \
+		| sed 's/"appid":/\n&/g' \
+		| sed -n 's/^"appid":\([0-9][0-9]*\).*/\1/p')
+	[ -n "$ids" ] || return 0
+
+	printf '%s\n' "$ids" > "$TMP_OAFIDS"
+	awk -F'\t' '
+		NR == FNR { cls[$1] = $2; next }
+		{ c = cls[$1]; if (c != "") n[c]++ }
+		END { for (k in n) printf "%s\t%d\n", k, n[k] }
+	' "$TMP_OAFMAP" "$TMP_OAFIDS" | top_list 5
 }
 
 # ------------------------------------------------------------- interfaces ---
@@ -430,16 +609,66 @@ do_devices() {
 	json_dump
 }
 
+# --------------------------------------------------------------- sessions ---
+
+# Connection table occupancy plus a breakdown of what those connections talk to.
+#
+# Separate from `devices` on purpose: device accounting needs conntrack byte
+# counters, which are off unless accounting is enabled, while the occupancy and
+# the port breakdown are available either way. Folding them together would make
+# the whole panel disappear on routers that disable acct to save memory.
+do_sessions() {
+	local now ct lim cc cm src
+	now=$(date +%s)
+
+	lim=$(ct_limits)
+	cc="${lim%% *}"
+	cm="${lim##* }"
+
+	# OAF first when it is actually running: an app name beats a port number.
+	# Anything short of a populated answer falls through to the ports.
+	src="port"
+	: > "$TMP_PORT"
+	if oaf_ready; then
+		oaf_classes "$OAF_CFG" > "$TMP_PORT"
+		[ -s "$TMP_PORT" ] && src="oaf"
+	fi
+
+	if [ "$src" = "port" ]; then
+		ct="$CT_TABLE"
+		[ -r "$ct" ] || ct="$CT_TABLE_ALT"
+		ct_ports "$ct" > "$TMP_PORT"
+	fi
+
+	json_init
+	json_add_int "timestamp" "$now"
+	json_add_int "count" "$cc"
+	json_add_int "max"   "$cm"
+	# Lets the UI label the breakdown for what it actually is.
+	json_add_string "source" "$src"
+	json_add_array "services"
+	while IFS="$(printf '\t')" read -r name n; do
+		[ -n "$name" ] || continue
+		json_add_object
+		json_add_string "name"  "$name"
+		json_add_int    "count" "$n"
+		json_close_object
+	done < "$TMP_PORT"
+	json_close_array
+	json_dump
+}
+
 # ------------------------------------------------------------------ entry ---
 
 case "$1" in
 	list)
-		echo '{ "interfaces": {}, "devices": {} }'
+		echo '{ "interfaces": {}, "devices": {}, "sessions": {} }'
 		;;
 	call)
 		case "$2" in
 			interfaces) do_interfaces ;;
 			devices)    do_devices ;;
+			sessions)   do_sessions ;;
 			*)          echo '{}' ;;
 		esac
 		;;

@@ -149,16 +149,18 @@ if (!fs.existsSync(HARNESS)) {
 function loadViewApi(src) {
 	let s = src.replace(/^'require [^']*';$/gm, '');
 	s = s.replace('return view.extend(', 'view.extend(');
-	const EXPORT = '\n;return { sideHtml, ifTableHtml, chartSvg, sparkSvg, aggregate,' +
-		' renderDevices, fmtBytes, fmtRate, fmtDuration, fmtProto, fmtSpeed, truthy, CSS };\n';
+	const EXPORT = '\n;return { sideHtml, ifTableHtml, connHtml, chartSvg, sparkSvg,' +
+		' aggregate, renderDevices, fmtBytes, fmtRate, fmtDuration, fmtProto, fmtSpeed,' +
+		' truthy, CSS };\n';
 	const f = new Function('view', 'rpc', 'poll', 'E', s + EXPORT);
 	return f({ extend: o => o }, { declare: () => () => Promise.resolve(null) },
 	         { add: () => {}, start: () => {} }, () => ({}));
 }
 
 function loadPreviewApi(layer) {
-	const EXPORT = '\n;return { sideHtml, ifTableHtml, chartSvg, sparkSvg, aggregate,' +
-		' renderDevices, fmtBytes, fmtRate, fmtDuration, fmtProto, fmtSpeed, truthy, CSS };\n';
+	const EXPORT = '\n;return { sideHtml, ifTableHtml, connHtml, chartSvg, sparkSvg,' +
+		' aggregate, renderDevices, fmtBytes, fmtRate, fmtDuration, fmtProto, fmtSpeed,' +
+		' truthy, CSS };\n';
 	return new Function(layer + EXPORT)();
 }
 
@@ -187,6 +189,22 @@ if (viewApi && prevApi) {
 
 	same('sideHtml 输出一致', viewApi.sideHtml(IF), prevApi.sideHtml(IF));
 	same('ifTableHtml 输出一致', viewApi.ifTableHtml(IF), prevApi.ifTableHtml(IF));
+
+	const SESS_OAF = {
+		count: 3412, max: 65536, source: 'oaf',
+		services: [ { name: '视频', count: 9 }, { name: '游戏', count: 5 },
+		            { name: '其他', count: 6 } ]
+	};
+	const SESS_PORT = {
+		count: 10, max: 100, source: 'port',
+		services: [ { name: 'HTTPS', count: 3 }, { name: '其他', count: 1 } ]
+	};
+	same('connHtml 输出一致（OAF）', viewApi.connHtml(SESS_OAF), prevApi.connHtml(SESS_OAF));
+	same('connHtml 输出一致（端口）', viewApi.connHtml(SESS_PORT), prevApi.connHtml(SESS_PORT));
+	same('connHtml 输出一致（空）', viewApi.connHtml(null), prevApi.connHtml(null));
+	same('connHtml 输出一致（max=0）',
+		viewApi.connHtml({ count: 5, max: 0, services: [] }),
+		prevApi.connHtml({ count: 5, max: 0, services: [] }));
 
 	const hist = [];
 	for (let i = 0; i < 60; i++) hist.push({ d: 1.7e6 * (1 + Math.sin(i / 9)), u: 3e5 });

@@ -37,8 +37,10 @@ ImmortalWrt / OpenWrt 的实时网络流量查看器（LuCI 插件）。
 | 网络接口状态    | 各网卡的协商速率（Mbit/s）与它承载的逻辑接口；软件接口没有速率，改报链路状态            | `/sys/class/net/*/speed`        |
 | 网络接口      | 每个接口的实时速率、最近 3 分钟曲线、累计收发                              | `/proc/net/dev`                 |
 | 设备流量排行    | 局域网每台设备的实时速率、累计流量、连接数                                 | `/proc/net/nf_conntrack`        |
+| 连接概况      | 连接跟踪表的实时占用，以及这些连接的目标分布：装了 OAF 时按应用分类，否则按远程端口归类          | `/proc/sys/net/netfilter/`、`/proc/net/nf_conntrack`（或 OAF） |
 
 - **零额外安装**：不依赖 `nlbwmon`、`vnstat`、`collectd`，只用内核已有的 `/proc` 与 `/sys`
+- **可选接入 OAF**：装了 OpenAppFilter 就自动改用它的应用分类，没装则回落到端口归类，两者都不影响使用（见[可选的 OAF 应用识别](#可选的-oaf-应用识别)）
 - **仅实时**：数据全部驻留内存，不落盘、不写数据库，重启即清空
 - **WAN / LAN 自动识别**：通过 `ifstatus` 解析逻辑接口，自动打标签并优先排序
 - **主图只统计 WAN**：不会把内网互传算成"上网流量"；识别不到 WAN 时退化为全部接口，保证图不空
@@ -139,6 +141,45 @@ rm -f /tmp/luci-indexcache*        # 通配符不能少，实际文件名是 luc
 `/etc/sysctl.d/11-nf-conntrack.conf` 把它打开的。如果你按某些"优化 NAT 内存"的教程把它关掉了，
 页面会明确提示而不是显示一堆 0。
 
+### 可选的 OAF 应用识别
+
+「连接概况」里的目标分布有两个来源，后端自己挑一个：
+
+| 条件                | 归类依据                                    |
+| ----------------- | --------------------------------------- |
+| 检测到 OpenAppFilter | **应用分类**（视频 / 游戏 / 聊天…），名字来自 OAF 的特征库 |
+| 其余情况              | **被访问的服务端口**（HTTPS / QUIC / DNS…）        |
+
+不装 OAF 完全不影响使用，只是看到的是端口而不是应用名。想装的话：
+
+```sh
+opkg update
+opkg install kmod-oaf appfilter luci-app-oaf
+```
+
+**装之前请注意三件事**：
+
+1. `kmod-oaf` 是内核模块，**必须与当前内核版本严格匹配**。ImmortalWrt 官方源里没有，
+   要么自己编译，要么找对应版本的 IPK；版本不符最常见的结果就是模块加载失败。
+2. OAF 与加速、广告过滤类模块存在冲突，上游也提示需要先关掉它们。
+3. **OAF 只上报访问时长，不上报字节数。** 它的 ubus 回复里所有统计字段都是
+   `first_time` / `latest_time`，`visit_info` 里也没有五元组可以跟 conntrack 的字节数对应。
+   所以 netview 拿到它之后能给的是"哪些应用在被使用、被多少台设备使用"，
+   **给不了"哪个应用吃了多少带宽"**。端口归类那一侧给出的则是连接数占比 ——
+   两者单位不同，卡片副标题会写明当前是哪一种。
+
+netview 用到的接口（都在 `appfilter` 这个 ubus 对象上，由 `appfilter` 包的 `oafd` 提供）：
+
+| 探测 / 取数          | 方式                                                     |
+| ---------------- | ------------------------------------------------------ |
+| 内核模块是否加载         | `/proc/sys/oaf/enable` 是否存在                             |
+| 守护进程是否在跑         | `ubus -v list appfilter` 是否成功                          |
+| appid → 应用名 / 分类 | 直接解析 `/tmp/feature.cfg`（纯文本，不必走 ubus）                  |
+| 哪些应用在被使用         | `ubus call appfilter dev_visit_list`                   |
+
+权限上有个细节：这些 `ubus` 调用是 netview 的 rpcd 脚本**以 root 直连**发出的，
+不经过 LuCI 的 ACL，所以 `acl.d` 里不需要额外声明 `appfilter`。
+
 ## 目录结构
 
 ```
@@ -176,19 +217,19 @@ luci-app-netview/
 ### 方式 A：直接下载 ipk（推荐）
 
 从 [Releases](https://github.com/zhouzhouzk/luci-app-netview/releases/latest) 下载
-`luci-app-netview_1.1.3-r1_all.ipk`，传到路由器安装：
+`luci-app-netview_1.1.4-r1_all.ipk`，传到路由器安装：
 
 ```sh
-scp luci-app-netview_1.1.3-r1_all.ipk root@192.168.1.1:/tmp/
-ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.1.3-r1_all.ipk'
+scp luci-app-netview_1.1.4-r1_all.ipk root@192.168.1.1:/tmp/
+ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.1.4-r1_all.ipk'
 ```
 
 也可以让路由器自己下载（省掉中转）：
 
 ```sh
 cd /tmp
-wget https://github.com/zhouzhouzk/luci-app-netview/releases/download/v1.1.3/luci-app-netview_1.1.3-r1_all.ipk
-opkg install luci-app-netview_1.1.3-r1_all.ipk
+wget https://github.com/zhouzhouzk/luci-app-netview/releases/download/v1.1.4/luci-app-netview_1.1.4-r1_all.ipk
+opkg install luci-app-netview_1.1.4-r1_all.ipk
 ```
 
 卸载：`opkg remove luci-app-netview`。
@@ -207,10 +248,10 @@ opkg install luci-app-netview_1.1.3-r1_all.ipk
 需要 Python 3，不需要 OpenWrt SDK：
 
 ```sh
-python build-ipk.py                    # 产物: dist/luci-app-netview_1.1.3-r1_all.ipk
+python build-ipk.py                    # 产物: dist/luci-app-netview_1.1.4-r1_all.ipk
 
-scp dist/luci-app-netview_1.1.3-r1_all.ipk root@192.168.1.1:/tmp/
-ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.1.3-r1_all.ipk'
+scp dist/luci-app-netview_1.1.4-r1_all.ipk root@192.168.1.1:/tmp/
+ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.1.4-r1_all.ipk'
 ```
 
 ### 方式 C：免编译一键部署
@@ -229,7 +270,7 @@ cd luci-app-netview
 ```sh
 cp -r luci-app-netview package/
 make package/luci-app-netview/compile V=s
-# 产物: bin/packages/*/base/luci-app-netview_1.1.3-r1_all.ipk
+# 产物: bin/packages/*/base/luci-app-netview_1.1.4-r1_all.ipk
 ```
 
 装完打开 `http://192.168.1.1/cgi-bin/luci/admin/status/netview`，菜单位置：**状态 → 网络流量**。
@@ -289,6 +330,19 @@ python build-ipk.py --list               # 只看载荷清单，不生成文件
 - 若是外网主动发起（端口转发），则方向对调
 
 主机名从 `/tmp/dhcp.leases` 匹配，匹配不到显示「未知设备」。
+
+**连接概况**：占用直接读 `/proc/sys/net/netfilter/nf_conntrack_count` 与 `nf_conntrack_max`，
+两个文件一行读完。
+
+目标分布只取 conntrack 行里**第一个 `dport`**。conntrack 的 original tuple 永远指向收包
+的那一端，所以出站时它是远端服务端口、入站（含端口转发）时它是本地服务端口 —— 两种情况
+都是"被访问的是什么"。reply tuple 的 `dport` 是客户端临时端口，在这里毫无意义；照它取值
+会把端口转发进来的连接全判成未知（那类连接的 original `dst` 是公网地址，所以"看哪边是
+私网"来定方向的做法会直接漏掉它们）。
+
+服务名（HTTPS / QUIC / DNS…）来自端口查表，不是 DPI。零散端口统一并进"其他"，所以这张表
+回答的是"连接都去了哪类服务"，而不是"每个应用各用了多少带宽"—— 后者是 OAF 的领域，
+而 OAF 也只给时长不给字节（见[可选的 OAF 应用识别](#可选的-oaf-应用识别)）。
 
 **流量记账检测**：采样前先确认 conntrack 表里存在 `bytes=` 字段。若表里有连接但没有字节计数，
 说明 `nf_conntrack_acct` 被关掉了，接口直接返回 `error: "conntrack_acct_disabled"`，
@@ -380,13 +434,17 @@ node tools/argon-harness.js   # 另：重新生成 preview/argon-harness.html
   标题重置的几条规则还在。这三类问题在纯预览页里都看不出来，只有装到路由器上才暴露，
   所以必须靠算出来的断言拦住
 - `parity.test.js` 剥掉预览页独有的 `.nv-force-dark` 覆盖块后，要求两边 CSS 完全一致，
-  并用同一份输入比对 `sideHtml` / `ifTableHtml` / `chartSvg` / 格式化函数的输出。
+  并用同一份输入比对 `sideHtml` / `ifTableHtml` / `connHtml` / `chartSvg` / 格式化函数的输出。
   它还盯着 `argon-harness.html` —— 静态骨架和渲染层脚本都要与预览页一致，
   否则"改了预览页忘了重新生成"会让测试页停在旧界面上，而它恰恰是用来判断真机效果的
-- `backend.test.sh` 把脚本里硬编码的 `/sys/class/net` 重定向到临时假目录，
-  真实执行 `if_speed` / `if_kind` / `if_link` / `if_roles` / `addr_of`，覆盖网桥成员口回退、
-  无线空值、隧道 `-1`、内核给 tun 回默认值 1000、`LOWER_UP` 缺失时靠全局地址兜底、
-  `wan` 与 `wan6` 落在同一物理口等边界
+- `backend.test.sh` 把脚本里硬编码的 `/sys/class/net` 以及 conntrack / OAF 的路径
+  一起重定向到临时假目录，真实执行 `if_speed` / `if_kind` / `if_link` / `if_roles` /
+  `addr_of` / `ct_ports` / `top_list` / `oaf_ready` / `oaf_app_map` / `oaf_classes`。
+  覆盖网桥成员口回退、无线空值、隧道 `-1`、内核给 tun 回默认值 1000、`LOWER_UP` 缺失时
+  靠全局地址兜底、`wan` 与 `wan6` 落在同一物理口等边界；连接表那份假数据专门覆盖了几个
+  容易写错的方向 —— 入站连接的服务端口在 original tuple 里、经端口转发进来的连接
+  original `dst` 是公网地址、IPv6 行必须整条跳过；OAF 那部分则用假 `ubus` 区分
+  "模块加载了" 与 "守护进程真的在跑"，并锁住"同一应用出现在两台设备上计 2"
 - `menu.test.js` 把上游 dispatcher 的 `resolve_firstchild()`、`ui.js` 的 `ui.menu.getChildren()`
   翻译成 JS 跑，用 `tools/fixtures/menu.d/` 里**原样抓下来的上游 menu.d** 构建菜单树
   （不是自己编的简化版），断言"登录落在 `admin/status/netview`"和"它在「状态」组排第一"。
@@ -417,6 +475,9 @@ node tools/argon-harness.js   # 另：重新生成 preview/argon-harness.html
 | 标题变成一块窄白卡、副标题看不清或"缺一半"         | Argon 把每个 `h2` 都当标题卡片，副标题被挤到页头的 `header::after` 主色横带上（`#8898aa` 叠 `#5e72e4` 仅 1.42:1）。1.1.1 起已修；旧版本可临时在自定义 CSS 里加 `.nv-head h2 { padding:0; background:none; box-shadow:none }` 并把 `.nv-head` 加上背景色 |
 | 暗色模式下卡片全是白的                   | 暗色令牌误用了 `var(--oc-surface, …)`，而 Argon 的 `dark.css` 并不全局重定义 `--oc-*`，暗色下拿到的还是 `#fff`。1.1.1 起暗色值改为写死 |
 | 中文标题行距被压得很扁                   | Argon 有 `h1..h6 { line-height: 1.1 !important }`；1.1.1 起在标题重置里用 `!important` 压回去了                |
+| 「连接概况」显示端口名（HTTPS / QUIC…）而不是应用名 | 说明没检测到 OAF。装了 OAF 也要确认 `oafd` 在跑：登录路由器执行 `ubus -v list appfilter`，能列出对象才算就绪 —— 内核模块加载了但守护进程没起，同样会回落到端口归类 |
+| 「连接概况」连接数为 0 或提示"读不到连接表上限" | `/proc/sys/net/netfilter/` 不可读，通常是缺 `kmod-nf-conntrack`。这一项与"设备排行"不同：连接数不依赖 conntrack 的流量记账开关，后者关掉也照样能读 |
+| `opkg install kmod-oaf` 失败               | 内核模块必须与内核版本严格匹配。ImmortalWrt 官方源里没有这个包，需要用对应版本的 SDK 自行编译，或找同版本的现成 IPK |
 | 想确认是不是主题把页面带歪了                | 打开 `preview/argon-harness.html`（Argon 骨架 + 官方样式，明暗都能看），与 `overview-preview.html` 对照          |
 | 曲线看起来太"平"                    | 空闲链路上纵轴有 32 KB/s 地板值，避免噪声被放大成满屏尖峰；有实际流量时曲线才会撑起来                            |
 | "已连接设备"数与设备排行条数对不上        | 两个口径不同：前者数 ARP 在线主机，后者只统计经过 NAT 转发且有流量的设备                                     |

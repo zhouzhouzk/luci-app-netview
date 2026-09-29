@@ -14,9 +14,9 @@ src = src.replace(/^'require [^']*';$/gm, '');
 // expression statement so the export appended below is actually reachable
 src = src.replace('return view.extend(', 'view.extend(');
 
-const EXPORT = '\n;return { sideHtml, ifTableHtml, chartSvg, sparkSvg, aggregate,' +
-	' renderDevices, fmtBytes, fmtRate, fmtDuration, fmtProto, fmtSpeed, CSS,' +
-	' truthy, niceMax, smoothPath };\n';
+const EXPORT = '\n;return { sideHtml, ifTableHtml, connHtml, svcColor, chartSvg,' +
+	' sparkSvg, aggregate, renderDevices, fmtBytes, fmtRate, fmtDuration, fmtProto,' +
+	' fmtSpeed, fmtInt, CSS, truthy, niceMax, smoothPath };\n';
 
 const viewStub = { extend: (o) => o };
 const rpcStub  = { declare: () => () => Promise.resolve(null) };
@@ -416,6 +416,70 @@ check('下载/上传数据色为固定值（不跟随主题色）',
 	!!hl(token(lightCss, 'nv-dn')) && !!hl(token(lightCss, 'nv-up')));
 check('暗色块不重复定义数据色（应沿用 .nv-root 上的同一组）',
 	token(darkCss, 'nv-dn') === null && token(darkCss, 'nv-up') === null);
+
+/* ------------------------------------------------- 11. 连接概况 --- */
+
+console.log('\n=== 连接概况 ===');
+
+/* 两副面孔：装了 OAF 给应用分类，否则给端口归类。占比口径不同（连接数 /
+ * 使用设备数），所以副标题必须跟着 source 变 —— 看错单位就会误读成流量。 */
+const SESS_PORT = {
+	count: 3412, max: 65536, source: 'port',
+	services: [
+		{ name: 'HTTPS', count: 1820 },
+		{ name: 'QUIC',  count: 640 },
+		{ name: 'DNS',   count: 268 },
+		{ name: '其他',  count: 588 }
+	]
+};
+
+const SESS_OAF = {
+	count: 3412, max: 65536, source: 'oaf',
+	services: [
+		{ name: '视频', count: 9 },
+		{ name: '游戏', count: 5 },
+		{ name: '其他', count: 6 }
+	]
+};
+
+let connOut = API.connHtml(SESS_PORT);
+check('端口模式给出占用/上限', connOut.includes('3,412') && connOut.includes('65,536'));
+check('端口模式列出服务名', connOut.includes('HTTPS') && connOut.includes('QUIC'));
+check('副标题说明是端口归类', connOut.includes('按远程端口归类'));
+check('无 NaN/undefined 泄漏', dirty(connOut) === null, dirty(connOut));
+check('堆叠段宽度之和为 100%', (function() {
+	// 第 1 个 width 是占用条，不是堆叠段
+	const ws = [...connOut.matchAll(/width:([\d.]+)%/g)].map((m) => parseFloat(m[1])).slice(1);
+	return ws.length >= 3 && Math.abs(ws.reduce((a, b) => a + b, 0) - 100) < 0.05;
+})(), connOut);
+
+connOut = API.connHtml(SESS_OAF);
+check('OAF 模式副标题改为应用分类', connOut.includes('OAF 应用分类'));
+check('OAF 模式列出分类名', connOut.includes('视频') && connOut.includes('游戏'));
+check('OAF 模式不退化成端口名', !/HTTPS|QUIC/.test(connOut));
+check('无 NaN/undefined 泄漏', dirty(connOut) === null, dirty(connOut));
+
+check('缺数据时给提示而不是崩', API.connHtml(null).includes('连接跟踪不可用'));
+check('没有可归类项时走空态',
+	API.connHtml({ count: 10, max: 100 }).includes('暂时没有可归类'));
+check('max=0 不画比例条也不出现 NaN', (function() {
+	const h = API.connHtml({ count: 10, max: 0, services: [{ name: 'DNS', count: 1 }] });
+	return !h.includes('NaN') && h.includes('读不到连接表上限');
+})());
+check('count 缺失按 0 处理', API.connHtml({ max: 100 }).includes('>0<i>'));
+
+check('低占用用绿', API.connHtml({ count: 10, max: 100 }).includes('#16a34a'));
+check('过 60% 转琥珀', API.connHtml({ count: 70, max: 100 }).includes('#d97706'));
+check('过 85% 转红', API.connHtml({ count: 90, max: 100 }).includes('#dc2626'));
+
+check('其他恒为灰', API.svcColor('其他', 0) === '#64748b');
+check('具名服务按序取色', API.svcColor('DNS', 0) === '#3b82f6');
+check('索引越界不返回 undefined', API.svcColor('X', 99) === '#db2777');
+
+check('fmtInt 加千分位', API.fmtInt(1234567) === '1,234,567');
+check('fmtInt 三位数不加分隔', API.fmtInt(999) === '999');
+check('fmtInt 处理空值', API.fmtInt(null) === '0' && API.fmtInt(0) === '0');
+check('fmtInt 取整', API.fmtInt(3412.4) === '3,412');
 
 console.log('\n======================================');
 console.log('  pass ' + pass + '   fail ' + fail);
