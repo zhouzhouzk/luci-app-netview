@@ -1,6 +1,6 @@
 {
 	"admin/status/netview": {
-		"title": "网络流量",
+		"title": "仪表盘",
 		"order": 0,
 		"action": {
 			"type": "view",
