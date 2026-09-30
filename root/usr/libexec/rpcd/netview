@@ -495,12 +495,17 @@ do_devices() {
 	# Name / MAC / alias sources are flattened into one typed stream, so the
 	# aggregate never depends on any of them being non-empty (empty inputs would
 	# break per-file FNR counting). Line kinds: 1=alias(mac,name) 2=lease(mac,
-	# ip,name) 3=arp(ip,mac). conntrack rides in as the second awk file.
+	# ip,name) 3=arp(ip,mac) 4=own-ip. conntrack rides in as the second awk file.
 	{
 		printf '0\n'
 		awk 'NF >= 2 { printf "1\t%s\t%s\n", $1, $2 }' "$TMP_ALIAS" 2>/dev/null
 		awk 'NF >= 4 { printf "2\t%s\t%s\t%s\n", $2, $3, $4 }' "$leases" 2>/dev/null
 		awk 'NF >= 4 && $3 == "0x2" { printf "3\t%s\t%s\n", $1, $4 }' "$ARP_FILE" 2>/dev/null
+		# The router's own globally-scoped addresses (LAN IP, PPP / tunnel inner
+		# IP, ...). Flows whose private side is one of these are the router's
+		# own traffic, not a LAN client's, so the ranking must drop them.
+		ip -4 -o addr show scope global 2>/dev/null \
+			| awk '$3 == "inet" { ip = $4; sub(/\/.*$/, "", ip); printf "4\t%s\n", ip }'
 	} > "$TMP_MERGE"
 
 	# Aggregate conntrack entries per private (LAN side) address.
@@ -521,6 +526,7 @@ do_devices() {
 		if ($1 == 1) { al[$2] = $3 }
 		else if ($1 == 2) { mc[$3] = $2; nm[$3] = $4 }
 		else if ($1 == 3) { if (!($2 in mc)) mc[$2] = $3 }
+		else if ($1 == 4) { own[$2] = 1 }
 		next
 	}
 	# /proc/net/nf_conntrack prefixes IPv4 lines with "ipv4", but the legacy
@@ -545,10 +551,12 @@ do_devices() {
 				else if (m == 2) b2 = t
 			}
 		}
-		if (s1 != "" && ispriv(s1)) {
+		# The private side must not be the router itself (own[]), else the LAN
+		# IP and the PPP / tunnel inner address would show up as "devices".
+		if (s1 != "" && ispriv(s1) && !(s1 in own)) {
 			up[s1] += b1; dn[s1] += b2; cn[s1]++
 		}
-		else if (d1 != "" && ispriv(d1)) {
+		else if (d1 != "" && ispriv(d1) && !(d1 in own)) {
 			up[d1] += b2; dn[d1] += b1; cn[d1]++
 		}
 	}

@@ -179,19 +179,19 @@ luci-app-netview/
 ### 方式 A：直接下载 ipk（推荐）
 
 从 [Releases](https://github.com/zhouzhouzk/luci-app-netview/releases/latest) 下载
-`luci-app-netview_1.4.1-r1_all.ipk`，传到路由器安装：
+`luci-app-netview_1.4.2-r1_all.ipk`，传到路由器安装：
 
 ```sh
-scp luci-app-netview_1.4.1-r1_all.ipk root@192.168.1.1:/tmp/
-ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.4.1-r1_all.ipk'
+scp luci-app-netview_1.4.2-r1_all.ipk root@192.168.1.1:/tmp/
+ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.4.2-r1_all.ipk'
 ```
 
 也可以让路由器自己下载（省掉中转）：
 
 ```sh
 cd /tmp
-wget https://github.com/zhouzhouzk/luci-app-netview/releases/download/v1.4.1/luci-app-netview_1.4.1-r1_all.ipk
-opkg install luci-app-netview_1.4.1-r1_all.ipk
+wget https://github.com/zhouzhouzk/luci-app-netview/releases/download/v1.4.2/luci-app-netview_1.4.2-r1_all.ipk
+opkg install luci-app-netview_1.4.2-r1_all.ipk
 ```
 
 卸载：`opkg remove luci-app-netview`。
@@ -210,10 +210,10 @@ opkg install luci-app-netview_1.4.1-r1_all.ipk
 需要 Python 3，不需要 OpenWrt SDK：
 
 ```sh
-python build-ipk.py                    # 产物: dist/luci-app-netview_1.4.1-r1_all.ipk
+python build-ipk.py                    # 产物: dist/luci-app-netview_1.4.2-r1_all.ipk
 
-scp dist/luci-app-netview_1.4.1-r1_all.ipk root@192.168.1.1:/tmp/
-ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.4.1-r1_all.ipk'
+scp dist/luci-app-netview_1.4.2-r1_all.ipk root@192.168.1.1:/tmp/
+ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.4.2-r1_all.ipk'
 ```
 
 ### 方式 C：免编译一键部署
@@ -232,7 +232,7 @@ cd luci-app-netview
 ```sh
 cp -r luci-app-netview package/
 make package/luci-app-netview/compile V=s
-# 产物: bin/packages/*/base/luci-app-netview_1.4.1-r1_all.ipk
+# 产物: bin/packages/*/base/luci-app-netview_1.4.2-r1_all.ipk
 ```
 
 装完打开 `http://192.168.1.1/cgi-bin/luci/admin/status/netview`，菜单位置：**状态 → 网络流量**。
@@ -292,6 +292,11 @@ python build-ipk.py --list               # 只看载荷清单，不生成文件
 - 若是外网主动发起（端口转发），则方向对调
 
 主机名从 `/tmp/dhcp.leases` 匹配，匹配不到显示「未知设备」。
+
+**剔除路由器自身**：聚合前先用 `ip -4 addr show scope global` 收集路由器自己的全部
+地址（LAN IP、PPP / 隧道内层地址等），conntrack 私网侧命中这些地址的流量一律不计入
+排行 —— 否则路由器自己（192.168.1.1）和 PPPoE 内层地址（如 172.17.x.x）会伪装成
+两台"未知设备"挂在榜首。
 
 **设备别名**：设备名只读，别名是独立一列、点铅笔编辑。别名**按 MAC 归属**，存在
 `/etc/config/netview` 的命名节里（`alias_aa_bb_cc_dd_ee_01 → option mac / option name`）。
@@ -420,7 +425,8 @@ node tools/argon-harness.js   # 另：重新生成 preview/argon-harness.html
 | 菜单里「网络流量」排不到第一              | 同上，`order` 要严格小于「概况」的 `1`（本插件用 `0`）。注意 order 相同时**前端按名字自然序、后端按文件加载顺序**取，两边结果可能不一致，所以不能靠打平 |
 | 页面空白 / 报 `netview` 未找到        | 登录路由器执行 `ubus -v list netview`，无输出说明 rpcd 插件没加载成功，检查 `/usr/libexec/rpcd/netview` 是否有执行权限 |
 | 速率一直显示 0 B/s                   | 正常，第一次采样没有基准值，等 3 秒后自动出数                                                                 |
-| 别名保存失败，提示"uci 命令失败" | `/etc/config/netview` 不存在时旧版本（1.4.0）写入会失败。1.4.1 起自动创建；旧版本可先 `touch /etc/config/netview` 再保存。另注意：写权限在登录时固化，升级后请退出重新登录 |
+| 别名保存失败，提示"uci 命令失败" | `/etc/config/netview` 不存在时旧版本（1.4.0）写入会失败。1.4.2 起自动创建；旧版本可先 `touch /etc/config/netview` 再保存。另注意：写权限在登录时固化，升级后请退出重新登录 |
+| 设备排行里出现路由器自己（如 192.168.1.1）或 PPP 内网 IP（如 172.17.x.x） | 1.4.1 及更早版本会把它们当设备统计。1.4.2 起按 `ip -4 addr` 自动剔除路由器自身地址，升级即解决 |
 | 设备排行提示「未开启流量记账」               | 执行 `sysctl -w net.netfilter.nf_conntrack_acct=1`；并在 `/etc/sysctl.d/11-nf-conntrack.conf` 里确认该值为 1，否则重启后失效 |
 | 设备排行显示「暂无活动的 NAT / 转发连接」      | 只有经过 NAT 转发的连接会被统计，路由器自身发起的流量不计入；确认 `lsmod \| grep nf_conntrack` 有输出                    |
 | 设备排行只有 IP 没有主机名               | `/tmp/dhcp.leases` 里没有该 IP 的记录（静态 IP 或 DHCP 租约过期）                                       |
@@ -428,9 +434,9 @@ node tools/argon-harness.js   # 另：重新生成 preview/argon-harness.html
 | 主图一直停在"正在采集数据"             | 首次采样没有基准值，等 3 秒；若一直如此说明后端没返回，登录路由器执行 `ubus call netview interfaces` 看输出           |
 | 连接状态显示"未连接互联网"但其实能上网      | 判断依据是 `ifstatus wan` 的 `up`。WAN 接口不叫 `wan`（多 WAN / 自定义名）时就会误报                       |
 | IP 地址显示"未获取"                 | 确认 `ip -4 addr show dev <wan设备> scope global` 有输出；WAN 设备名取自 `ifstatus` 的 `l3_device`      |
-| `pppoe-wan` / `utun` / `AmneziaWG` 状态写着"未连接"，但上下行明明有数据 | 1.1.2 及之前只按 `operstate` 判链路，而这几个点对点设备的 `operstate` 永远是 `unknown`。1.4.1 起改为综合 `IFF_UP` / `LOWER_UP` 与是否持有全局地址来判 |
-| 「网络接口状态」里某块显示"已连接"而不是速率   | 正常。PPP / tun / wireguard 没有可协商的链路，1.4.1 起改报链路状态词，不再印一个看着像"没状态"的 `—`            |
-| 隧道口显示了 1000 Mbit/s             | 1.4.1 起只有物理网卡（以及网桥的成员口）才报速率。部分内核对没有 phy 的设备会回 ethtool 的默认值 `1000`，照读就是假的 |
+| `pppoe-wan` / `utun` / `AmneziaWG` 状态写着"未连接"，但上下行明明有数据 | 1.1.2 及之前只按 `operstate` 判链路，而这几个点对点设备的 `operstate` 永远是 `unknown`。1.4.2 起改为综合 `IFF_UP` / `LOWER_UP` 与是否持有全局地址来判 |
+| 「网络接口状态」里某块显示"已连接"而不是速率   | 正常。PPP / tun / wireguard 没有可协商的链路，1.4.2 起改报链路状态词，不再印一个看着像"没状态"的 `—`            |
+| 隧道口显示了 1000 Mbit/s             | 1.4.2 起只有物理网卡（以及网桥的成员口）才报速率。部分内核对没有 phy 的设备会回 ethtool 的默认值 `1000`，照读就是假的 |
 | 标题变成一块窄白卡、副标题看不清或"缺一半"         | Argon 把每个 `h2` 都当标题卡片，副标题被挤到页头的 `header::after` 主色横带上（`#8898aa` 叠 `#5e72e4` 仅 1.42:1）。1.1.1 起已修；旧版本可临时在自定义 CSS 里加 `.nv-head h2 { padding:0; background:none; box-shadow:none }` 并把 `.nv-head` 加上背景色 |
 | 暗色模式下卡片全是白的                   | 暗色令牌误用了 `var(--oc-surface, …)`，而 Argon 的 `dark.css` 并不全局重定义 `--oc-*`，暗色下拿到的还是 `#fff`。1.1.1 起暗色值改为写死 |
 | 中文标题行距被压得很扁                   | Argon 有 `h1..h6 { line-height: 1.1 !important }`；1.1.1 起在标题重置里用 `!important` 压回去了                |

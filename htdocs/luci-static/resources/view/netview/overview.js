@@ -1015,7 +1015,7 @@ return view.extend({
 			E('div', { 'class': 'nv-sec' }, [
 				E('div', { 'class': 'nv-sec-hd' }, [
 					E('h3', {}, '设备流量排行'),
-					E('span', {}, '按当前存活连接的累计字节排序，最多 ' + MAX_DEVICES + ' 条')
+					E('span', {}, '按当前存活连接的累计字节排序，已排除路由器自身流量，最多 ' + MAX_DEVICES + ' 条')
 				]),
 				devBox
 			])

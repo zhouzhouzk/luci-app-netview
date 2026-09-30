@@ -60,6 +60,17 @@ esac
 exit 1
 EOS
 chmod +x "$SB/bin/uci"
+
+# fake ip：只覆盖 do_devices 用的 "ip -4 -o addr show scope global"，
+# 返回路由器自身地址（LAN IP + PPP 内层 IP），用于验证自身流量被剔除。
+cat > "$SB/bin/ip" <<'EOS'
+#!/bin/sh
+echo "2: br-lan    inet 192.168.1.1/24 brd 192.168.1.255 scope global br-lan"
+echo "7: pppoe-wan inet 172.17.240.84/32 scope global pppoe-wan"
+exit 0
+EOS
+chmod +x "$SB/bin/ip"
+
 export UCI_STATE="$SB/uci.state"
 : > "$UCI_STATE"
 PATH="$SB/bin:$PATH"; export PATH
@@ -68,6 +79,8 @@ PATH="$SB/bin:$PATH"; export PATH
 cat > "$SB/nf_conntrack" <<'EOS'
 ipv4     2 tcp      6 431999 ESTABLISHED src=192.168.9.5 dst=8.8.8.8 sport=1 dport=443 src=8.8.8.8 dst=192.168.9.5 sport=443 dport=1 packets=1 bytes=100 mark=0 use=1
 ipv4     2 tcp      6 431999 ESTABLISHED src=192.168.9.6 dst=8.8.4.4 sport=2 dport=443 src=8.8.4.4 dst=192.168.9.6 sport=443 dport=2 packets=1 bytes=200 mark=0 use=1
+ipv4     2 tcp      6 431999 ESTABLISHED src=192.168.1.1 dst=223.5.5.5 sport=3 dport=53 src=223.5.5.5 dst=192.168.1.1 sport=53 dport=3 packets=1 bytes=500 mark=0 use=1
+ipv4     2 tcp      6 431999 ESTABLISHED src=172.17.240.84 dst=1.2.4.8 sport=4 dport=443 src=1.2.4.8 dst=172.17.240.84 sport=443 dport=4 packets=1 bytes=900 mark=0 use=1
 EOS
 cat > "$SB/dhcp.leases" <<'EOS'
 431999 aa:bb:cc:dd:ee:01 192.168.9.5 desktop
@@ -107,6 +120,12 @@ has "$out" '"ip":"192.168.9.5","host":"desktop","alias":"","mac":"aa:bb:cc:dd:ee
 has "$out" '"ip":"192.168.9.6","host":"-","alias":"","mac":"aa:bb:cc:dd:ee:02"' && r2=1 || r2=0
 ck "lease：主机名 + MAC 齐"      "$r1" "1"
 ck "arp 回落：主机名 - / MAC 在" "$r2" "1"
+
+# 路由器自身地址（ip -4 addr 收集到的 LAN IP / PPP 内层 IP）不得出现在排行里
+has "$out" '"ip":"192.168.1.1"' && r3=1 || r3=0
+has "$out" '"ip":"172.17.240.84"' && r4=1 || r4=0
+ck "本机 LAN IP 被剔除"         "$r3" "0"
+ck "pppoe 内层 IP 被剔除"       "$r4" "0"
 
 echo ""
 echo "=== set_alias：按 MAC 写、读、清 ==="
