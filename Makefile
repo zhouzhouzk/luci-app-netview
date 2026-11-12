@@ -5,10 +5,18 @@
 #   cp -r luci-app-netview package/
 #   make package/luci-app-netview/compile V=s
 #
-# Or, with no SDK at all, use the standalone builder next to this file:
+# Or, with no SDK at all, use the standalone builder next to this file
+# (ipk only, for 24.10 and older):
 #   python build-ipk.py
 #
-# Tested against ImmortalWrt 24.10.6 (x86/64).
+# Tested against ImmortalWrt 24.10.6 (ipk / opkg) and 25.12.2 (apk).
+#
+# 25.12 and newer switched the package manager to apk, so the same Makefile
+# now emits luci-app-netview-<ver>-r<rel>.apk instead of a .ipk. The switch is
+# CONFIG_USE_APK in the buildroot/SDK config; nothing in this file has to
+# change for it. postinst/prerm are translated to apk's lifecycle hooks by
+# include/package-pack.mk -- see the guard below for why they must not call
+# default_postinst/default_prerm twice.
 #
 # Every runtime dependency below is part of a stock ImmortalWrt image, so the
 # package installs without pulling anything in:
@@ -28,7 +36,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-netview
-PKG_VERSION:=1.4.3
+PKG_VERSION:=1.5.0
 PKG_RELEASE:=1
 
 PKG_LICENSE:=Apache-2.0
@@ -75,12 +83,18 @@ endef
 # The LuCI menu / ACL index is cached in /tmp, and rpcd only rescans
 # /usr/libexec/rpcd and /usr/share/rpcd/acl.d when it is reloaded, so both have
 # to happen for the new ubus object and menu entry to show up without a reboot.
+#
+# ipk vs apk: opkg runs this script verbatim, so it has to call default_postinst
+# itself. apk (25.12+) wraps it into a "post-install" hook that already calls
+# default_postinst and exports pkgname first, then appends this body -- calling
+# it a second time would re-run uci-defaults and service reloads. The
+# [ -n "${pkgname:-}" ] guard tells the two cases apart.
 define Package/luci-app-netview/postinst
 #!/bin/sh
 [ "$${IPKG_NO_SCRIPT}" = "1" ] && exit 0
 [ -s "$${IPKG_INSTROOT}/lib/functions.sh" ] && {
 . "$${IPKG_INSTROOT}/lib/functions.sh"
-default_postinst "$$0" "$$@"
+[ -n "$${pkgname:-}" ] || default_postinst "$$0" "$$@"
 }
 [ -n "$${IPKG_INSTROOT}" ] || {
 rm -f /tmp/luci-indexcache /tmp/luci-indexcache.*
@@ -94,7 +108,7 @@ define Package/luci-app-netview/prerm
 #!/bin/sh
 [ -s "$${IPKG_INSTROOT}/lib/functions.sh" ] && {
 . "$${IPKG_INSTROOT}/lib/functions.sh"
-default_prerm "$$0" "$$@"
+[ -n "$${pkgname:-}" ] || default_prerm "$$0" "$$@"
 }
 [ -n "$${IPKG_INSTROOT}" ] || {
 rm -f /tmp/luci-indexcache /tmp/luci-indexcache.*

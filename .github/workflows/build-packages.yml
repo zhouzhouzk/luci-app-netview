@@ -1,0 +1,117 @@
+name: build-packages
+
+# 编译 luci-app-netview 成两种包格式：
+#   ImmortalWrt 25.12.x -> .apk（apk-tools，25.12 起默认包管理器）
+#   ImmortalWrt 24.10.x -> .ipk（opkg，兼容老版本）
+#
+# 触发：推 main / 开 PR / 手动 / 推 v* 标签（标签会顺带把产物挂到 Release）。
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: ImmortalWrt 25.12.2 x86_64 (apk)
+            sdk_version: 25.12.2
+            sdk_url: https://downloads.immortalwrt.org/releases/25.12.2/targets/x86/64/immortalwrt-sdk-25.12.2-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+            ext: apk
+            apk: true
+          - label: ImmortalWrt 24.10.6 x86_64 (ipk)
+            sdk_version: 24.10.6
+            sdk_url: https://downloads.immortalwrt.org/releases/24.10.6/targets/x86/64/immortalwrt-sdk-24.10.6-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+            ext: ipk
+            apk: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential zstd rsync libncurses-dev libssl-dev \
+            python3 unzip wget
+
+      - name: Download and extract SDK
+        run: |
+          set -euo pipefail
+          echo "SDK: ${{ matrix.sdk_url }}"
+          curl -fL --retry 3 --retry-delay 5 -o sdk.tar.zst "${{ matrix.sdk_url }}"
+          ls -lh sdk.tar.zst
+          mkdir -p sdk
+          zstd -d -c sdk.tar.zst | tar -xf - -C sdk --strip-components=1
+          ls sdk | head
+
+      - name: Update and install feeds
+        working-directory: sdk
+        run: |
+          set -euo pipefail
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Drop package into the tree
+        run: |
+          set -euo pipefail
+          mkdir -p sdk/package/luci-app-netview
+          cp -r Makefile htdocs root sdk/package/luci-app-netview/
+          find sdk/package/luci-app-netview -type f | sort
+
+      - name: Configure
+        working-directory: sdk
+        run: |
+          set -euo pipefail
+          # apk 由 CONFIG_USE_APK 切换（25.12 SDK 默认已开，这里显式钉住）。
+          if [ "${{ matrix.apk }}" = "true" ]; then
+            echo "CONFIG_USE_APK=y" >> .config
+          fi
+          echo "CONFIG_PACKAGE_luci-app-netview=m" >> .config
+          make defconfig
+          grep -E 'CONFIG_USE_APK|CONFIG_PACKAGE_luci-app-netview' .config || true
+
+      - name: Build package
+        working-directory: sdk
+        run: |
+          set -euo pipefail
+          make package/luci-app-netview/compile V=s -j"$(nproc)" 2>&1 | tee build.log
+          echo "--- tail ---"
+          tail -n 30 build.log
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          find sdk/bin/packages -type f -name "*.${{ matrix.ext }}" -exec cp -v {} out/ \;
+          echo "--- produced ---"
+          ls -l out
+          test -n "$(ls -A out)" || { echo "::error::no .${{ matrix.ext }} produced"; exit 1; }
+          # 同时把校验和留档，方便安装前核对
+          (cd out && sha256sum * > SHA256SUMS)
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: luci-app-netview-${{ matrix.sdk_version }}-${{ matrix.ext }}
+          path: out/*
+          if-no-files-found: error
+
+      - name: Attach to release (tag only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: out/*
+          fail_on_unmatched_files: true

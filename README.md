@@ -5,7 +5,8 @@
 
 ImmortalWrt / OpenWrt 的实时网络流量查看器（LuCI 插件）。
 
-针对 **ImmortalWrt 24.10.6 (x86/64)** 编写，兼容 21.02 - 24.10 全系（LuCI2 / JS 版）。
+针对 **ImmortalWrt 24.10.6 / 25.12.2 (x86/64)** 编写，兼容 21.02 - 25.12 全系（LuCI2 / JS 版）。
+24.10 及更早用 opkg（`.ipk`），25.12 起用 apk（`.apk`）—— 两种格式都由 CI 自动编译。
 
 界面参考 [iStoreOS](https://github.com/istoreos) 的快速设置页：左侧一块大卡片放汇总流量曲线，
 右侧一列窄卡片放连接状态与接口信息，下方两张明细表。
@@ -145,8 +146,9 @@ rm -f /tmp/luci-indexcache*        # 通配符不能少，实际文件名是 luc
 
 ```
 luci-app-netview/
+├── .github/workflows/build-packages.yml         # CI：25.12.2 出 apk、24.10.6 出 ipk
 ├── Makefile                                     # OpenWrt 包定义（可进 feed / SDK 编译）
-├── build-ipk.py                                 # 独立 ipk 构建器（无需 SDK）
+├── build-ipk.py                                 # 独立 ipk 构建器（无需 SDK，24.10 及更早）
 ├── install.sh                                   # 免路由器编译的一键部署脚本
 ├── htdocs/luci-static/resources/view/netview/
 │   └── overview.js                              # 前端视图
@@ -176,22 +178,43 @@ luci-app-netview/
 
 ## 安装
 
-### 方式 A：直接下载 ipk（推荐）
+**先按固件版本选包格式**：ImmortalWrt **25.12 及更新**用 `.apk`（apk-tools），
+**24.10 及更早**用 `.ipk`（opkg）。格式装错会直接报包格式不支持。
+
+### 方式 A：25.12+ —— 直接下载 apk（推荐）
 
 从 [Releases](https://github.com/zhouzhouzk/luci-app-netview/releases/latest) 下载
-`luci-app-netview_1.4.3-r1_all.ipk`，传到路由器安装：
+`luci-app-netview-1.5.0-r1.apk`，传到路由器安装：
 
 ```sh
-scp luci-app-netview_1.4.3-r1_all.ipk root@192.168.1.1:/tmp/
-ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.4.3-r1_all.ipk'
+cd /tmp
+wget https://github.com/zhouzhouzk/luci-app-netview/releases/download/v1.5.0/luci-app-netview-1.5.0-r1.apk
+apk add --allow-untrusted ./luci-app-netview-1.5.0-r1.apk
+```
+
+本地编译出来的包没有官方源签名，必须带 `--allow-untrusted`。装完 apk 会自动执行
+post-install 钩子（重建 LuCI 菜单缓存、reload rpcd），刷新页面即可看到菜单。
+卸载：`apk del luci-app-netview`。
+
+> 从 25.12 起 apk 不会自动装依赖；本包的四个依赖都在官方固件里，正常不用管。
+> 若提示缺包，先 `apk update`，仍缺就 `apk add luci-base rpcd jshn netifd`。
+
+### 方式 B：24.10 及更早 —— 直接下载 ipk（推荐）
+
+从 [Releases](https://github.com/zhouzhouzk/luci-app-netview/releases/latest) 下载
+`luci-app-netview_1.5.0-r1_all.ipk`，传到路由器安装：
+
+```sh
+scp luci-app-netview_1.5.0-r1_all.ipk root@192.168.1.1:/tmp/
+ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.5.0-r1_all.ipk'
 ```
 
 也可以让路由器自己下载（省掉中转）：
 
 ```sh
 cd /tmp
-wget https://github.com/zhouzhouzk/luci-app-netview/releases/download/v1.4.3/luci-app-netview_1.4.3-r1_all.ipk
-opkg install luci-app-netview_1.4.3-r1_all.ipk
+wget https://github.com/zhouzhouzk/luci-app-netview/releases/download/v1.5.0/luci-app-netview_1.5.0-r1_all.ipk
+opkg install luci-app-netview_1.5.0-r1_all.ipk
 ```
 
 卸载：`opkg remove luci-app-netview`。
@@ -205,18 +228,18 @@ opkg install luci-app-netview_1.4.3-r1_all.ipk
 > （成员名、顺序、tar 变体、八进制字段填充都与官方源里的包一致）。
 > **23.05 及更早的 opkg 只认老格式**，那些版本请改用下面的方式 C 或进 SDK 编译。
 
-### 方式 B：自己构建 ipk
+### 方式 C：自己构建 ipk
 
 需要 Python 3，不需要 OpenWrt SDK：
 
 ```sh
-python build-ipk.py                    # 产物: dist/luci-app-netview_1.4.3-r1_all.ipk
+python build-ipk.py                    # 产物: dist/luci-app-netview_1.5.0-r1_all.ipk
 
-scp dist/luci-app-netview_1.4.3-r1_all.ipk root@192.168.1.1:/tmp/
-ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.4.3-r1_all.ipk'
+scp dist/luci-app-netview_1.5.0-r1_all.ipk root@192.168.1.1:/tmp/
+ssh root@192.168.1.1 'opkg install /tmp/luci-app-netview_1.5.0-r1_all.ipk'
 ```
 
-### 方式 C：免编译一键部署
+### 方式 D：免编译一键部署
 
 不想做成包、只想快点看到效果时用这个，直接 scp 四个文件上去：
 
@@ -227,15 +250,37 @@ cd luci-app-netview
 ./install.sh --uninstall 192.168.1.1  # 卸载
 ```
 
-### 方式 D：进 SDK / feed 编译
+### 方式 E：进 SDK / feed 编译（ipk 或 apk）
 
 ```sh
 cp -r luci-app-netview package/
 make package/luci-app-netview/compile V=s
-# 产物: bin/packages/*/base/luci-app-netview_1.4.3-r1_all.ipk
+# 24.10 及更早: bin/packages/*/base/luci-app-netview_1.5.0-r1_all.ipk
+# 25.12 及更新: bin/packages/*/base/luci-app-netview-1.5.0-r1.apk
 ```
 
+产物格式由 SDK 的 `CONFIG_USE_APK` 决定：24.10 为空（opkg，出 ipk），25.12 起默认开启
+（apk，出 apk）。同一份 Makefile 不需要改。
+
 装完打开 `http://192.168.1.1/cgi-bin/luci/admin/status/netview`，菜单位置：**状态 → 仪表盘**。
+
+## GitHub Actions 自动编译
+
+`.github/workflows/build-packages.yml` 会在每次推 `main`、开 PR 或手动触发时，分别用
+ImmortalWrt **25.12.2**（出 `.apk`）和 **24.10.6**（出 `.ipk`）的 x86/64 SDK 编译一遍，
+产物挂在 Actions 的 Artifacts 里；推 `v*` 标签时还会自动附加到对应的 Release。
+
+```sh
+# 本地想复现同样的流程（Linux / macOS）
+curl -fLO https://downloads.immortalwrt.org/releases/25.12.2/targets/x86/64/immortalwrt-sdk-25.12.2-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+mkdir sdk && tar --zstd -xf immortalwrt-sdk-25.12.2-*.tar.zst -C sdk --strip-components=1
+cd sdk && ./scripts/feeds update -a && ./scripts/feeds install -a
+mkdir -p package/luci-app-netview && cp -r ../Makefile ../htdocs ../root package/luci-app-netview/
+echo CONFIG_PACKAGE_luci-app-netview=m >> .config
+make defconfig && make package/luci-app-netview/compile V=s
+```
+
+> 25.12 的 SDK 是 `.tar.zst`，解压需要 `zstd`（`apt install zstd`）。
 
 ## 构建 ipk
 
@@ -425,8 +470,8 @@ node tools/argon-harness.js   # 另：重新生成 preview/argon-harness.html
 | 菜单里「仪表盘」排不到第一              | 同上，`order` 要严格小于「概况」的 `1`（本插件用 `0`）。注意 order 相同时**前端按名字自然序、后端按文件加载顺序**取，两边结果可能不一致，所以不能靠打平 |
 | 页面空白 / 报 `netview` 未找到        | 登录路由器执行 `ubus -v list netview`，无输出说明 rpcd 插件没加载成功，检查 `/usr/libexec/rpcd/netview` 是否有执行权限 |
 | 速率一直显示 0 B/s                   | 正常，第一次采样没有基准值，等 3 秒后自动出数                                                                 |
-| 别名保存失败，提示"uci 命令失败" | `/etc/config/netview` 不存在时旧版本（1.4.0）写入会失败。1.4.3 起自动创建；旧版本可先 `touch /etc/config/netview` 再保存。另注意：写权限在登录时固化，升级后请退出重新登录 |
-| 设备排行里出现路由器自己（如 192.168.1.1）或 PPP 内网 IP（如 172.17.x.x） | 1.4.1 及更早版本会把它们当设备统计。1.4.3 起按 `ip -4 addr` 自动剔除路由器自身地址，升级即解决 |
+| 别名保存失败，提示"uci 命令失败" | `/etc/config/netview` 不存在时旧版本（1.4.0）写入会失败。1.4.1 起自动创建；旧版本可先 `touch /etc/config/netview` 再保存。另注意：写权限在登录时固化，升级后请退出重新登录 |
+| 设备排行里出现路由器自己（如 192.168.1.1）或 PPP 内网 IP（如 172.17.x.x） | 1.4.1 及更早版本会把它们当设备统计。1.4.2 起按 `ip -4 addr` 自动剔除路由器自身地址，升级即解决 |
 | 设备排行提示「未开启流量记账」               | 执行 `sysctl -w net.netfilter.nf_conntrack_acct=1`；并在 `/etc/sysctl.d/11-nf-conntrack.conf` 里确认该值为 1，否则重启后失效 |
 | 设备排行显示「暂无活动的 NAT / 转发连接」      | 只有经过 NAT 转发的连接会被统计，路由器自身发起的流量不计入；确认 `lsmod \| grep nf_conntrack` 有输出                    |
 | 设备排行只有 IP 没有主机名               | `/tmp/dhcp.leases` 里没有该 IP 的记录（静态 IP 或 DHCP 租约过期）                                       |
@@ -434,9 +479,9 @@ node tools/argon-harness.js   # 另：重新生成 preview/argon-harness.html
 | 主图一直停在"正在采集数据"             | 首次采样没有基准值，等 3 秒；若一直如此说明后端没返回，登录路由器执行 `ubus call netview interfaces` 看输出           |
 | 连接状态显示"未连接互联网"但其实能上网      | 判断依据是 `ifstatus wan` 的 `up`。WAN 接口不叫 `wan`（多 WAN / 自定义名）时就会误报                       |
 | IP 地址显示"未获取"                 | 确认 `ip -4 addr show dev <wan设备> scope global` 有输出；WAN 设备名取自 `ifstatus` 的 `l3_device`      |
-| `pppoe-wan` / `utun` / `AmneziaWG` 状态写着"未连接"，但上下行明明有数据 | 1.1.2 及之前只按 `operstate` 判链路，而这几个点对点设备的 `operstate` 永远是 `unknown`。1.4.3 起改为综合 `IFF_UP` / `LOWER_UP` 与是否持有全局地址来判 |
-| 「网络接口状态」里某块显示"已连接"而不是速率   | 正常。PPP / tun / wireguard 没有可协商的链路，1.4.3 起改报链路状态词，不再印一个看着像"没状态"的 `—`            |
-| 隧道口显示了 1000 Mbit/s             | 1.4.3 起只有物理网卡（以及网桥的成员口）才报速率。部分内核对没有 phy 的设备会回 ethtool 的默认值 `1000`，照读就是假的 |
+| `pppoe-wan` / `utun` / `AmneziaWG` 状态写着"未连接"，但上下行明明有数据 | 1.1.2 及之前只按 `operstate` 判链路，而这几个点对点设备的 `operstate` 永远是 `unknown`。1.1.3 起改为综合 `IFF_UP` / `LOWER_UP` 与是否持有全局地址来判 |
+| 「网络接口状态」里某块显示"已连接"而不是速率   | 正常。PPP / tun / wireguard 没有可协商的链路，1.1.3 起改报链路状态词，不再印一个看着像"没状态"的 `—`            |
+| 隧道口显示了 1000 Mbit/s             | 1.1.3 起只有物理网卡（以及网桥的成员口）才报速率。部分内核对没有 phy 的设备会回 ethtool 的默认值 `1000`，照读就是假的 |
 | 标题变成一块窄白卡、副标题看不清或"缺一半"         | Argon 把每个 `h2` 都当标题卡片，副标题被挤到页头的 `header::after` 主色横带上（`#8898aa` 叠 `#5e72e4` 仅 1.42:1）。1.1.1 起已修；旧版本可临时在自定义 CSS 里加 `.nv-head h2 { padding:0; background:none; box-shadow:none }` 并把 `.nv-head` 加上背景色 |
 | 暗色模式下卡片全是白的                   | 暗色令牌误用了 `var(--oc-surface, …)`，而 Argon 的 `dark.css` 并不全局重定义 `--oc-*`，暗色下拿到的还是 `#fff`。1.1.1 起暗色值改为写死 |
 | 中文标题行距被压得很扁                   | Argon 有 `h1..h6 { line-height: 1.1 !important }`；1.1.1 起在标题重置里用 `!important` 压回去了                |
