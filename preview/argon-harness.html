@@ -121,31 +121,38 @@ var ifHist = {};
 var yScale = 0;
 
 var CSS = [
+	/* ---- tokens ---- */
+	/* Vantage first: --v-* are aliases of the theme's palette, and the theme
+	 * swaps that palette on html[data-darkmode="true"], so one declaration
+	 * serves both modes. Argon's --oc-* come next, literals last. */
 	'.nv-root {',
-	'  --nv-bg:     var(--oc-surface-muted, #f2f4f8);',
-	'  --nv-card:   var(--oc-surface, #ffffff);',
-	'  --nv-border: var(--oc-border, #ecedf3);',
-	'  --nv-text:   var(--oc-text, #2b3445);',
+	'  --nv-bg:     var(--v-bg, var(--oc-surface-muted, #f2f4f8));',
+	'  --nv-card:   var(--v-surface, var(--oc-surface, #ffffff));',
+	'  --nv-border: var(--v-line, var(--oc-border, #ecedf3));',
+	'  --nv-text:   var(--v-text, var(--oc-text, #2b3445));',
 	/* 次要文字不再跟随 --oc-text-muted：Argon 给的是 #8898aa，在白卡上只有
 	 * 2.95:1、在页底上 2.70:1，小字号中文看着就是一片糊 —— 达不到正文
 	 * AA 要求的 4.5:1。下面这两个值都在各自的底上实算过：
 	 *   亮 #5f6d84 → 白卡 5.24 / Argon 浅底 4.96 / Argon 页底 4.80 / 无主题页底 4.76
 	 *   暗 #8a93a5 → 卡片 5.33 / 页底 5.85
 	 * 最差也有 4.76:1。仍明显弱于主文字（亮 12.50、暗 11.99），层次还在。 */
-	'  --nv-muted:  #5f6d84;',
+	'  --nv-muted:  var(--v-text-2, #5f6d84);',
 	'  --nv-dn:     ' + C_DOWN + ';',
 	'  --nv-up:     ' + C_UP + ';',
-	'  --nv-ok:     #22c55e;',
-	'  --nv-off:    #b9c0cd;',
-	'  --nv-radius: 14px;',
-	'  --nv-shadow: 0 1px 2px rgba(16,24,40,.04), 0 10px 28px rgba(16,24,40,.06);',
+	'  --nv-ok:     var(--v-ok, #22c55e);',
+	'  --nv-off:    var(--v-text-3, #b9c0cd);',
+	'  --nv-radius: var(--v-r-lg, 14px);',
+	'  --nv-shadow: var(--v-shadow, 0 1px 2px rgba(16,24,40,.04), 0 10px 28px rgba(16,24,40,.06));',
 	'  color: var(--nv-text); font-size: 13px; line-height: 1.5;',
 	'  padding: 2px 0 28px;',
 	'}',
-	/* 暗色这一套不沿用 --oc-*（详见 overview.js：Argon 的 dark.css 并没有
-	 * 全局重定义 --oc-*，暗色下 --oc-surface 仍是 #fff），全部写死。 */
+	/* 暗色这一套只给「自己不管明暗」的主题用。Vantage 用
+	 * html[data-darkmode] 切换整套 --v-*，上面那层已经跟着变了；若这里再盖
+	 * 一层写死的值，手动切换主题时页面会停在另一种模式。值全部写死、不引用
+	 * --oc-*：Argon 的 dark.css 并没有全局重定义它们（只在 openclash 那页
+	 * 重定义了一套），照搬会把卡片画成白色。 */
 	'@media (prefers-color-scheme: dark) {',
-	'  .nv-root {',
+	'  html:not([data-darkmode]) .nv-root {',
 	'    --nv-bg:     #14161c;',
 	'    --nv-card:   #1c1f27;',
 	'    --nv-border: #2b3038;',
@@ -155,20 +162,29 @@ var CSS = [
 	'    --nv-shadow: 0 1px 2px rgba(0,0,0,.35), 0 10px 28px rgba(0,0,0,.28);',
 	'  }',
 	'}',
-	/* 预览专用：把暗色回退值绑到类名上，好让按钮能切换 */
-	'.nv-root.nv-force-dark {',
-	'  --nv-bg: #14161c; --nv-card: #1c1f27; --nv-border: #2b3038;',
-	'  --nv-text: #d8dce4; --nv-muted: #8a93a5; --nv-off: #5b6373;',
-	'  --nv-shadow: 0 1px 2px rgba(0,0,0,.35), 0 10px 28px rgba(0,0,0,.28);',
-	'}',
 
+	/* ---- generic card ---- */
 	'.nv-card { background: var(--nv-card); border: 1px solid var(--nv-border);',
 	'           border-radius: var(--nv-radius); box-shadow: var(--nv-shadow); }',
 
-	/* 把标题控制权从主题手里收回。完整来龙去脉见 overview.js 里同一段：
-	 * Argon 会把 h2/h3 当成白底标题卡片，还会给 h1..h6 加
-	 * line-height:1.1 !important。标题区自带底色之后，主题在背后画的
-	 * 页头横带（header::after）就压不到副标题上了。 */
+	/* ---- page head ---- */
+	/* 主题的全局标题样式会改造这里，必须先收回控制权。以 Argon 为例：
+	 *
+	 *   1) h2 { padding:1rem 1.25rem; background:var(--white); box-shadow:… }
+	 *      —— 它把**每一个** h2 都当成"页面标题卡片"。而本插件的标题是
+	 *      .nv-head 这个 flex 容器里的 flex item，套上卡片后会被收缩成一行
+	 *      窄白卡，副标题被挤到卡片外面 —— 正好落在 Argon 页头那条 2rem 高的
+	 *      主色横带（header::after）上。#8898aa 叠 #5e72e4 只有 1.42:1，
+	 *      那行字基本等于隐形，看着就像"字缺了一半"。
+	 *   2) h3 { display:block; width:100%; background:var(--white) }
+	 *      —— 同样会把区块标题撑成整条白卡，把右边的说明挤成两行。
+	 *   3) h1..h6 { line-height: 1.1 !important }
+	 *      —— 中文标题会被压扁。要压掉对方的 !important 只能也用 !important
+	 *      （这里选择器权重更高，且本样式在 <body> 内、文档序更靠后）。
+	 *
+	 * 另外把标题区做成卡片：无论主题在背后画什么横带，标题和副标题都落在
+	 * 确定的底色上。这既符合 Argon 自己"页面标题即卡片"的惯例，也让它成为
+	 * 主题无关的解法 —— 不用去猜某个主题的横带有多高。 */
 	'.nv-root h2, .nv-root h3 { margin: 0; padding: 0; width: auto; display: block;',
 	'                           background: none; border: 0; box-shadow: none;',
 	'                           border-radius: 0; color: inherit;',
@@ -182,10 +198,14 @@ var CSS = [
 	'.nv-live { display: inline-block; width: 6px; height: 6px; border-radius: 50%;',
 	'           background: var(--nv-ok); margin-right: 5px; vertical-align: 1px; }',
 
+	/* ---- hero grid ---- */
+	/* 不用 align-items:start：左列必须拉伸，图表下面那张卡才能吃掉与右列的
+	 * 高度差。只用内容高度的话 flex-grow 无从发力，留白还在。 */
 	'.nv-hero { display: grid; gap: 16px;',
 	'           grid-template-columns: minmax(0, 1fr) 364px; }',
 	'@media (max-width: 1000px) { .nv-hero { grid-template-columns: minmax(0, 1fr); } }',
 
+	/* ---- hero chart ---- */
 	'.nv-chartcard { padding: 16px 18px 10px; }',
 	'.nv-chart-hd { display: flex; align-items: center; flex-wrap: wrap;',
 	'               gap: 6px 14px; margin-bottom: 4px; }',
@@ -208,6 +228,11 @@ var CSS = [
 	'                  color: var(--nv-muted); }',
 
 	/* ---- connection overview ---- */
+	/* The side column stacks four cards and ends up taller than the chart, so
+	 * the grid row is sized by the side column and the left column would stop
+	 * short, leaving a hole under the chart. .nv-col is a flex column and this
+	 * card takes the slack via flex-grow, which equalises the two columns
+	 * without pinning the chart to a magic height. */
 	'.nv-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }',
 	'.nv-conn { flex: 1 1 auto; display: flex; flex-direction: column;',
 	'          padding: 15px 17px 16px; min-height: 148px; }',
@@ -223,6 +248,8 @@ var CSS = [
 	'.nv-gauge-n i { font-style: normal; font-size: 12px; font-weight: 400;',
 	'               color: var(--nv-muted); margin-left: 5px; }',
 	'.nv-gauge-s { margin-top: 6px; font-size: 11.5px; color: var(--nv-muted); }',
+	/* taller than the table's inline bar: this one is the page's only read on
+	 * how full the connection table is, so it has to be readable at a glance */
 	'.nv-conn .nv-track { height: 8px; border-radius: 4px; margin: 10px 0 0; }',
 	'.nv-dist { flex: 1 1 220px; min-width: 0; }',
 	'.nv-stack { display: flex; height: 12px; border-radius: 6px;',
@@ -238,6 +265,7 @@ var CSS = [
 	'.nv-key b { margin-left: auto; padding-left: 6px; font-weight: 600;',
 	'           color: var(--nv-muted); font-variant-numeric: tabular-nums; }',
 
+	/* ---- side column ---- */
 	'.nv-side { display: flex; flex-direction: column; gap: 16px; }',
 
 	'.nv-mini { display: flex; align-items: center; gap: 13px; padding: 15px 17px; }',
@@ -265,6 +293,7 @@ var CSS = [
 	'.nv-row-v { min-width: 0; word-break: break-all; }',
 	'.nv-row-v em { font-style: normal; color: var(--nv-muted); }',
 
+	/* ---- interface tiles ---- */
 	'.nv-tiles { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }',
 	'.nv-tile { display: flex; align-items: center; gap: 7px; padding: 9px 10px;',
 	'           border-radius: 11px; background: var(--nv-bg);',
@@ -278,11 +307,14 @@ var CSS = [
 	'.nv-tile-s { font-size: 10px; color: var(--nv-muted); margin-top: 1px;',
 	'             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
 
+	/* ---- sections ---- */
 	'.nv-sec { margin-top: 18px; }',
 	'.nv-sec-hd { display: flex; align-items: baseline; gap: 10px; margin: 0 2px 10px; }',
+	/* 卡片外观由上面「page head」里的 .nv-root h2/h3 全局重置收回 */
 	'.nv-sec-hd h3 { font-size: 14px; font-weight: 600; }',
 	'.nv-sec-hd span { font-size: 11.5px; color: var(--nv-muted); }',
 
+	/* ---- tables ---- */
 	'.nv-tablewrap { overflow-x: auto; border-radius: var(--nv-radius);',
 	'                background: var(--nv-card); border: 1px solid var(--nv-border);',
 	'                box-shadow: var(--nv-shadow); }',
@@ -353,7 +385,46 @@ var CSS = [
 	'            border: 1px dashed var(--nv-border); border-radius: var(--nv-radius); }',
 	'.nv-hint { display: block; margin-top: 8px; font-size: 11.5px; }',
 	'.nv-empty code { padding: 1px 6px; border-radius: 4px; font-size: 12px;',
-	'                 background: var(--nv-bg); color: var(--nv-text); }'
+	'                 background: var(--nv-bg); color: var(--nv-text); }',
+
+	/* ---- Vantage: its type scale, corners and interaction states ----
+	 * Every value falls back to the page's own when the theme is absent, so
+	 * Bootstrap / Argon keep the layout above unchanged. Placed last so it can
+	 * refine the fixed sizes; all colours still go through --nv-*, which the
+	 * Vantage tokens already feed. */
+	'.nv-root { font-family: var(--v-font, inherit);',
+	'           font-size: var(--v-fs-base, 13px); }',
+	'.nv-root .nv-head h2 { font-size: var(--v-fs-xl, 17px);',
+	'                       font-weight: var(--v-fw-semibold, 600); }',
+	'.nv-root .nv-head .nv-sub { font-size: var(--v-fs-sm, 12px); }',
+	'.nv-root .nv-sec-hd h3 { font-size: var(--v-fs-md, 14px);',
+	'                         font-weight: var(--v-fw-semibold, 600); }',
+	'.nv-root .nv-mac, .nv-root .nv-num, .nv-root .nv-now b,',
+	'.nv-root .nv-gauge-n, .nv-root .nv-mini-n, .nv-root .nv-devip {',
+	'  font-family: var(--v-mono, ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace); }',
+	'.nv-root .nv-card, .nv-root .nv-head, .nv-root .nv-tablewrap,',
+	'.nv-root .nv-empty { border-radius: var(--v-r-lg, var(--nv-radius));',
+	'                     box-shadow: var(--v-shadow, var(--nv-shadow)); }',
+	'.nv-root .nv-card:hover { box-shadow: var(--v-shadow-raise, var(--nv-shadow)); }',
+	'.nv-root .nv-chartcard, .nv-root .nv-conn, .nv-root .nv-info {',
+	'  padding-left: var(--v-card-px, 18px);',
+	'  padding-right: var(--v-card-px, 18px); }',
+	'.nv-root .nv-tile { border-radius: var(--v-r, 11px); }',
+	'.nv-root .nv-info-hd .nv-tag { border-radius: var(--v-r-sm, 999px); }',
+	'.nv-root .nv-track, .nv-root .nv-track i, .nv-lg i {',
+	'  border-radius: var(--v-r-xs, 3px); }',
+	'.nv-root .nv-table tbody tr:hover, .nv-root .nv-edit:hover {',
+	'  background: var(--v-hover, var(--nv-bg)); }',
+	'.nv-root .nv-edit:focus-visible, .nv-root .nv-alias-in:focus-visible,',
+	'.nv-root .nv-save:focus-visible, .nv-root .nv-cancel:focus-visible {',
+	'  outline: 2px solid var(--v-focus, var(--nv-dn)); outline-offset: 2px; }',
+
+	/* 预览专用：右上角按钮强制切换暗色 */
+	'.nv-root.nv-force-dark {',
+	'  --nv-bg: #14161c; --nv-card: #1c1f27; --nv-border: #2b3038;',
+	'  --nv-text: #d8dce4; --nv-muted: #8a93a5; --nv-off: #5b6373;',
+	'  --nv-shadow: 0 1px 2px rgba(0,0,0,.35), 0 10px 28px rgba(0,0,0,.28);',
+	'}',
 ].join('\n');
 
 /* ------------------------------------------------------------------ icons --- */

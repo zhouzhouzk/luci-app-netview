@@ -25,11 +25,11 @@
  * second poll interval.
  *
  * Styling is self-contained: every colour resolves through a --nv-* custom
- * property declared on .nv-root, whose default is itself var(--oc-*, <light
- * value>). Argon (and any theme that defines --oc-surface / --oc-text / ...)
- * therefore still drives surfaces and text, while the iStoreOS-inspired
- * fallbacks keep the page looking right on themes that define nothing.
- * A prefers-color-scheme block swaps the fallbacks for dark values.
+ * property on .nv-root. Vantage's --v-* tokens come first (its light/dark
+ * switch is html[data-darkmode], so both modes follow the theme), then Argon's
+ * --oc-* tokens, then the iStoreOS-inspired literals. A theme that defines
+ * nothing still gets a complete light/dark page; a prefers-color-scheme block
+ * covers the themes that have no mode attribute of their own.
  */
 
 var callInterfaces = rpc.declare({
@@ -81,34 +81,37 @@ var yScale = 0;              /* smoothed vertical scale (B/s) */
 
 var CSS = [
 	/* ---- tokens ---- */
+	/* Vantage first: --v-* are aliases of the theme's palette, and the theme
+	 * swaps that palette on html[data-darkmode="true"], so one declaration
+	 * serves both modes. Argon's --oc-* come next, literals last. */
 	'.nv-root {',
-	'  --nv-bg:     var(--oc-surface-muted, #f2f4f8);',
-	'  --nv-card:   var(--oc-surface, #ffffff);',
-	'  --nv-border: var(--oc-border, #ecedf3);',
-	'  --nv-text:   var(--oc-text, #2b3445);',
+	'  --nv-bg:     var(--v-bg, var(--oc-surface-muted, #f2f4f8));',
+	'  --nv-card:   var(--v-surface, var(--oc-surface, #ffffff));',
+	'  --nv-border: var(--v-line, var(--oc-border, #ecedf3));',
+	'  --nv-text:   var(--v-text, var(--oc-text, #2b3445));',
 	/* 次要文字不再跟随 --oc-text-muted：Argon 给的是 #8898aa，在白卡上只有
 	 * 2.95:1、在页底上 2.70:1，小字号中文看着就是一片糊 —— 达不到正文
 	 * AA 要求的 4.5:1。下面这两个值都在各自的底上实算过：
 	 *   亮 #5f6d84 → 白卡 5.24 / Argon 浅底 4.96 / Argon 页底 4.80 / 无主题页底 4.76
 	 *   暗 #8a93a5 → 卡片 5.33 / 页底 5.85
 	 * 最差也有 4.76:1。仍明显弱于主文字（亮 12.50、暗 11.99），层次还在。 */
-	'  --nv-muted:  #5f6d84;',
+	'  --nv-muted:  var(--v-text-2, #5f6d84);',
 	'  --nv-dn:     ' + C_DOWN + ';',
 	'  --nv-up:     ' + C_UP + ';',
-	'  --nv-ok:     #22c55e;',
-	'  --nv-off:    #b9c0cd;',
-	'  --nv-radius: 14px;',
-	'  --nv-shadow: 0 1px 2px rgba(16,24,40,.04), 0 10px 28px rgba(16,24,40,.06);',
+	'  --nv-ok:     var(--v-ok, #22c55e);',
+	'  --nv-off:    var(--v-text-3, #b9c0cd);',
+	'  --nv-radius: var(--v-r-lg, 14px);',
+	'  --nv-shadow: var(--v-shadow, 0 1px 2px rgba(16,24,40,.04), 0 10px 28px rgba(16,24,40,.06));',
 	'  color: var(--nv-text); font-size: 13px; line-height: 1.5;',
 	'  padding: 2px 0 28px;',
 	'}',
-	/* 暗色这一套**不沿用 --oc-***，全部写死。
-	 * Argon 的 header.ut 是「cascade.css 常驻 + 按需叠加 dark.css」，
-	 * 而 dark.css 并没有全局重定义 --oc-*（只在 openclash 那页重定义了一套）。
-	 * 也就是说暗色下全局的 --oc-surface 仍然是 #fff —— 照搬就会把卡片画成
-	 * 白色、边框画成浅灰，暗色模式整个是坏的。 */
+	/* 暗色这一套只给「自己不管明暗」的主题用。Vantage 用
+	 * html[data-darkmode] 切换整套 --v-*，上面那层已经跟着变了；若这里再盖
+	 * 一层写死的值，手动切换主题时页面会停在另一种模式。值全部写死、不引用
+	 * --oc-*：Argon 的 dark.css 并没有全局重定义它们（只在 openclash 那页
+	 * 重定义了一套），照搬会把卡片画成白色。 */
 	'@media (prefers-color-scheme: dark) {',
-	'  .nv-root {',
+	'  html:not([data-darkmode]) .nv-root {',
 	'    --nv-bg:     #14161c;',
 	'    --nv-card:   #1c1f27;',
 	'    --nv-border: #2b3038;',
@@ -341,7 +344,39 @@ var CSS = [
 	'            border: 1px dashed var(--nv-border); border-radius: var(--nv-radius); }',
 	'.nv-hint { display: block; margin-top: 8px; font-size: 11.5px; }',
 	'.nv-empty code { padding: 1px 6px; border-radius: 4px; font-size: 12px;',
-	'                 background: var(--nv-bg); color: var(--nv-text); }'
+	'                 background: var(--nv-bg); color: var(--nv-text); }',
+
+	/* ---- Vantage: its type scale, corners and interaction states ----
+	 * Every value falls back to the page's own when the theme is absent, so
+	 * Bootstrap / Argon keep the layout above unchanged. Placed last so it can
+	 * refine the fixed sizes; all colours still go through --nv-*, which the
+	 * Vantage tokens already feed. */
+	'.nv-root { font-family: var(--v-font, inherit);',
+	'           font-size: var(--v-fs-base, 13px); }',
+	'.nv-root .nv-head h2 { font-size: var(--v-fs-xl, 17px);',
+	'                       font-weight: var(--v-fw-semibold, 600); }',
+	'.nv-root .nv-head .nv-sub { font-size: var(--v-fs-sm, 12px); }',
+	'.nv-root .nv-sec-hd h3 { font-size: var(--v-fs-md, 14px);',
+	'                         font-weight: var(--v-fw-semibold, 600); }',
+	'.nv-root .nv-mac, .nv-root .nv-num, .nv-root .nv-now b,',
+	'.nv-root .nv-gauge-n, .nv-root .nv-mini-n, .nv-root .nv-devip {',
+	'  font-family: var(--v-mono, ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace); }',
+	'.nv-root .nv-card, .nv-root .nv-head, .nv-root .nv-tablewrap,',
+	'.nv-root .nv-empty { border-radius: var(--v-r-lg, var(--nv-radius));',
+	'                     box-shadow: var(--v-shadow, var(--nv-shadow)); }',
+	'.nv-root .nv-card:hover { box-shadow: var(--v-shadow-raise, var(--nv-shadow)); }',
+	'.nv-root .nv-chartcard, .nv-root .nv-conn, .nv-root .nv-info {',
+	'  padding-left: var(--v-card-px, 18px);',
+	'  padding-right: var(--v-card-px, 18px); }',
+	'.nv-root .nv-tile { border-radius: var(--v-r, 11px); }',
+	'.nv-root .nv-info-hd .nv-tag { border-radius: var(--v-r-sm, 999px); }',
+	'.nv-root .nv-track, .nv-root .nv-track i, .nv-lg i {',
+	'  border-radius: var(--v-r-xs, 3px); }',
+	'.nv-root .nv-table tbody tr:hover, .nv-root .nv-edit:hover {',
+	'  background: var(--v-hover, var(--nv-bg)); }',
+	'.nv-root .nv-edit:focus-visible, .nv-root .nv-alias-in:focus-visible,',
+	'.nv-root .nv-save:focus-visible, .nv-root .nv-cancel:focus-visible {',
+	'  outline: 2px solid var(--v-focus, var(--nv-dn)); outline-offset: 2px; }'
 ].join('\n');
 
 /* ------------------------------------------------------------------ icons --- */

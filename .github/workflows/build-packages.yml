@@ -129,6 +129,21 @@ jobs:
           path: out/*
           if-no-files-found: error
 
+      # 每次推 main 都把 24.10 的 ipk 挂到一个固定的预发布上，方便直接下载
+      # 最新构建，而不必进 Actions 找 artifact。版本化发布仍由 v* 标签触发。
+      - name: Publish latest ipk from main
+        if: github.ref == 'refs/heads/main' && matrix.ext == 'ipk'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build from main
+          prerelease: true
+          body: |
+            Automated build of the current `main` branch (ImmortalWrt 24.10.6 SDK).
+            Updated on every push to main; use a `v*` tag for a versioned release.
+          files: out/*
+          fail_on_unmatched_files: true
+
       - name: Attach to release (tag only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2

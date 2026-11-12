@@ -359,15 +359,23 @@ MAC 优先取 `/tmp/dhcp.leases`，静态设备回落 `/proc/net/arp`（flags `0
 ## 外观与主题适配
 
 外观按 iStoreOS 快速设置页做：浅灰底 + 白色卡片 + 柔和投影，主图是蓝色（下载）/ 紫色（上传）
-两个渐变面积叠加。所有颜色通过挂在 `.nv-root` 上的 `--nv-*` 自定义属性下发，取值形式统一是
-`var(--oc-surface, <内置回退>)`：
+两个渐变面积叠加。所有颜色通过挂在 `.nv-root` 上的 `--nv-*` 自定义属性下发，按
+「Vantage → Argon → 内置回退」三级取值：
 
-- 装了 [luci-theme-argon](https://github.com/jerrykuku/luci-theme-argon) 时 `--oc-*` 生效，
-  卡片、边框、文字自动融进主题
-- 没装 Argon（或主题不定义 `--oc-*`）时回退到内置亮色值；系统偏好为深色时，由一段
+- 装了 [luci-theme-vantage](https://github.com/zhouzhouzk/luci-theme-vantage) 时优先用主题的
+  `--v-*` 令牌：底色、卡片、边框、文字、字阶、等宽字体、圆角、阴影、hover 与焦点环都跟主题一致。
+  Vantage 用 `html[data-darkmode]` 切换明暗，所以**手动切换主题时页面会同步换色**，不会再被
+  `prefers-color-scheme` 里写死的暗色值盖住
+- 装了 [luci-theme-argon](https://github.com/jerrykuku/luci-theme-argon)（没有 Vantage）时
+  `--oc-*` 生效，卡片、边框、文字自动融进主题
+- 两个主题都没装时回退到内置亮色值；系统偏好为深色时，由一段
   `@media (prefers-color-scheme: dark)` 换成内置暗色值
 - **数据色刻意不跟随主题主色**：下载蓝 `#4a9df5`、上传紫 `#8b5cf6` 是两个系列的身份标识，
-  在明暗两套下保持同一色相才便于对照
+  在明暗两套下保持同一色相才便于对照（Vantage 的主色是 lime，拿来做下载会和主题语义打架）
+
+本地预览页 `preview/overview-preview.html` 右上角新增「模拟 Vantage 主题」按钮，按
+关 → 亮 → 暗循环，可以在不开路由器的情况下核对这三种外观；`tools/parity.test.js` 会盯着
+预览页、视图与 Argon 测试页的 CSS/渲染层始终同源。
 
 ### 和 Argon 的三处冲突（都已处理）
 
