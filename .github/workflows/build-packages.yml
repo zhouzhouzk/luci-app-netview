@@ -101,7 +101,26 @@ jobs:
           echo "--- produced ---"
           ls -l out
           test -n "$(ls -A out)" || { echo "::error::no .${{ matrix.ext }} produced"; exit 1; }
-          (cd out && sha256sum * > SHA256SUMS)
+          # 每个矩阵任务只带自己那一份校验和，否则并行任务会互相覆盖
+          (cd out && sha256sum *.${{ matrix.ext }} > SHA256SUMS.${{ matrix.ext }})
+
+      - name: Verify package contents
+        if: matrix.apk
+        run: |
+          set -euo pipefail
+          APK=$(ls out/*.apk | head -1)
+          echo "checking $APK"
+          # apk-tools 3 自带 adbdump；列出包内文件与元数据，确认装进去的是本插件
+          if sdk/staging_dir/host/bin/apk adbdump "$APK" > /tmp/adbdump.txt 2>&1; then
+            head -40 /tmp/adbdump.txt
+            grep -q "luci-app-netview" /tmp/adbdump.txt
+            grep -q "usr/libexec/rpcd/netview" /tmp/adbdump.txt
+            grep -q "view/netview/overview.js" /tmp/adbdump.txt
+            echo "package contents OK"
+          else
+            echo "::warning::apk adbdump 不可用，跳过内容校验"
+            tail -5 /tmp/adbdump.txt || true
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
