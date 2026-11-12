@@ -94,11 +94,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
-          find sdk/bin/packages -type f -name "*.${{ matrix.ext }}" -exec cp -v {} out/ \;
+          # 只取本包。编译 luci-app-netview 会顺带把依赖链（luci-base / ucode /
+          # jshn …）也编进 bin/packages，不过滤的话整个 feed 都会被当成产物。
+          find sdk/bin/packages -type f -name "luci-app-netview*.${{ matrix.ext }}" \
+            -exec cp -v {} out/ \;
           echo "--- produced ---"
           ls -l out
           test -n "$(ls -A out)" || { echo "::error::no .${{ matrix.ext }} produced"; exit 1; }
-          # 同时把校验和留档，方便安装前核对
           (cd out && sha256sum * > SHA256SUMS)
 
       - name: Upload artifacts
